@@ -32,7 +32,7 @@ class AzureAppGatewayResourceTemplateSpec extends Specification {
   def 'generate an Azure Application Gateway resource template using a description object'() {
     String template = AzureAppGatewayResourceTemplate.getTemplate(description)
 
-    expect: template.replaceAll('"createdTime" : "\\d+"', '"createdTime" : "1234567890"') == expectedFullTemplate
+    expect: template.replaceAll('"createdTime" : "\\d+"', '"createdTime" : "1234567890"').replace('\r', '') == expectedFullTemplate
   }
 
   def 'generate an Azure Application Gateway resource template using a minimal description object'() {
@@ -43,7 +43,7 @@ class AzureAppGatewayResourceTemplateSpec extends Specification {
 
     String template = AzureAppGatewayResourceTemplate.getTemplate(description)
 
-    expect: template.replaceAll('"createdTime" : "\\d+"', '"createdTime" : "1234567890"') == expectedMinimalTemplate
+    expect: template.replaceAll('"createdTime" : "\\d+"', '"createdTime" : "1234567890"').replace('\r', '') == expectedMinimalTemplate
   }
 
   def 'should fail to generate an Azure Application Gateway resource template using a description object with no name'() {
@@ -156,6 +156,9 @@ class AzureAppGatewayResourceTemplateSpec extends Specification {
     "tags" : null,
     "properties" : {
       "publicIPAllocationMethod" : "[variables('publicIPAddressType')]"
+    },
+    "sku" : {
+      "name" : "Basic"
     }
   }, {
     "apiVersion" : "[variables('apiVersion')]",
@@ -175,7 +178,7 @@ class AzureAppGatewayResourceTemplateSpec extends Specification {
       "subnet" : "subnet-testappgw-lb1-d1",
       "vnetResourceGroup" : null
     },
-    "dependsOn" : [ "[concat('Microsoft.Network/publicIPAddresses/', variables('publicIPAddressName'))]" ],
+    "dependsOn" : [ "[concat('Microsoft.Network/publicIPAddresses/',variables('publicIPAddressName'))]" ],
     "properties" : {
       "sku" : {
         "name" : "Standard_Small",
@@ -330,6 +333,9 @@ class AzureAppGatewayResourceTemplateSpec extends Specification {
     "tags" : null,
     "properties" : {
       "publicIPAllocationMethod" : "[variables('publicIPAddressType')]"
+    },
+    "sku" : {
+      "name" : "Basic"
     }
   }, {
     "apiVersion" : "[variables('apiVersion')]",
@@ -342,7 +348,7 @@ class AzureAppGatewayResourceTemplateSpec extends Specification {
       "subnet" : "subnet-testappgw-lb1-d1",
       "vnetResourceGroup" : null
     },
-    "dependsOn" : [ "[concat('Microsoft.Network/publicIPAddresses/', variables('publicIPAddressName'))]" ],
+    "dependsOn" : [ "[concat('Microsoft.Network/publicIPAddresses/',variables('publicIPAddressName'))]" ],
     "properties" : {
       "sku" : {
         "name" : "Standard_Small",

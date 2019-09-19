@@ -18,7 +18,6 @@ package com.netflix.spinnaker.clouddriver.titus.client.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.netflix.titus.grpc.protogen.*;
-
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +35,7 @@ public class JobDescription {
   private int instancesMin;
   private int cpu;
   private int memory;
+  private int sharedMemory;
   private int disk;
   private int gpu;
   private int retries;
@@ -64,10 +64,14 @@ public class JobDescription {
   private MigrationPolicy migrationPolicy;
   private Map<String, String> securityAttributes;
 
-  //Soft/Hard constraints
+  private DisruptionBudget disruptionBudget;
 
-  JobDescription() {
-  }
+  private SubmitJobRequest.Constraints constraints;
+  private ServiceJobProcesses serviceJobProcesses;
+
+  // Soft/Hard constraints
+
+  JobDescription() {}
 
   JobDescription(SubmitJobRequest request) {
     type = request.getJobType();
@@ -75,30 +79,36 @@ public class JobDescription {
     applicationName = request.getDockerImageName();
     version = request.getDockerImageVersion();
     digest = request.getDockerDigest();
-    instancesDesired = request.getInstanceDesired();
-    instancesMin = request.getInstanceMin();
-    instancesMax = request.getInstanceMax();
+    instancesDesired = request.getInstancesDesired();
+    instancesMin = request.getInstancesMin();
+    instancesMax = request.getInstancesMax();
     cpu = request.getCpu();
     memory = request.getMemory();
+    sharedMemory = request.getSharedMemory();
     disk = request.getDisk();
     ports = request.getPorts();
     networkMbps = request.getNetworkMbps();
-    allocateIpAddress = request.getAllocateIpAddress();
+    allocateIpAddress = request.isAllocateIpAddress();
     appName = request.getApplication();
     jobGroupStack = request.getStack();
     jobGroupDetail = request.getDetail();
-    softConstraints = request.getConstraints().stream()
-      .filter((c) -> c.getConstraintType() == SubmitJobRequest.Constraint.ConstraintType.SOFT)
-      .map(SubmitJobRequest.Constraint::getConstraint)
-      .collect(Collectors.toList());
-    hardConstraints = request.getConstraints().stream()
-      .filter((c) -> c.getConstraintType() == SubmitJobRequest.Constraint.ConstraintType.HARD)
-      .map(SubmitJobRequest.Constraint::getConstraint)
-      .collect(Collectors.toList());
+    softConstraints =
+        request.getConstraints().stream()
+            .filter((c) -> c.getConstraintType() == SubmitJobRequest.Constraint.ConstraintType.SOFT)
+            .map(SubmitJobRequest.Constraint::getConstraint)
+            .collect(Collectors.toList());
+    hardConstraints =
+        request.getConstraints().stream()
+            .filter((c) -> c.getConstraintType() == SubmitJobRequest.Constraint.ConstraintType.HARD)
+            .map(SubmitJobRequest.Constraint::getConstraint)
+            .collect(Collectors.toList());
     user = request.getUser();
     env = request.getEnv() != null ? request.getEnv() : new HashMap<>();
     labels = request.getLabels() != null ? request.getLabels() : new HashMap<>();
-    containerAttributes = request.getContainerAttributes() != null ? request.getContainerAttributes() : new HashMap<>();
+    containerAttributes =
+        request.getContainerAttributes() != null
+            ? request.getContainerAttributes()
+            : new HashMap<>();
     entryPoint = request.getEntryPoint();
     iamProfile = request.getIamProfile();
     capacityGroup = request.getCapacityGroup();
@@ -110,6 +120,10 @@ public class JobDescription {
     retries = request.getRetries();
     runtimeLimitSecs = request.getRuntimeLimitSecs();
     securityAttributes = new HashMap<String, String>();
+
+    disruptionBudget = request.getDisruptionBudget();
+    constraints = request.getContainerConstraints();
+    serviceJobProcesses = request.getServiceJobProcesses();
   }
 
   public String getName() {
@@ -379,9 +393,38 @@ public class JobDescription {
     this.securityGroups = securityGroups;
   }
 
-  public void setDigest(String digest) { this.digest = digest; }
+  public void setDigest(String digest) {
+    this.digest = digest;
+  }
 
-  public String getDigest() { return digest; }
+  public String getDigest() {
+    return digest;
+  }
+
+  public DisruptionBudget getDisruptionBudget() {
+    return disruptionBudget;
+  }
+
+  public void setDisruptionBudget(DisruptionBudget disruptionBudget) {
+    this.disruptionBudget = disruptionBudget;
+  }
+
+  public ServiceJobProcesses getServiceJobProcesses() {
+    return serviceJobProcesses;
+  }
+
+  public void setServiceJobProcesses(ServiceJobProcesses serviceJobProcesses) {
+    this.serviceJobProcesses = serviceJobProcesses;
+  }
+
+  @JsonIgnore
+  public SubmitJobRequest.Constraints getConstraints() {
+    return constraints;
+  }
+
+  public void setConstraints(SubmitJobRequest.Constraints constraints) {
+    this.constraints = constraints;
+  }
 
   @JsonIgnore
   public Map<String, String> getSecurityAttributes() {
@@ -391,7 +434,8 @@ public class JobDescription {
   @JsonIgnore
   public JobDescriptor getGrpcJobDescriptor() {
 
-    // trying to keep the same order as in the proto definition https://stash.corp.netflix.com/projects/TN/repos/titus-api-definitions/browse/src/main/proto/netflix/titus/titus_job_api.proto
+    // trying to keep the same order as in the proto definition
+    // https://stash.corp.netflix.com/projects/TN/repos/titus-api-definitions/browse/src/main/proto/netflix/titus/titus_job_api.proto
 
     JobDescriptor.Builder jobDescriptorBuilder = JobDescriptor.newBuilder();
 
@@ -403,7 +447,8 @@ public class JobDescription {
     }
 
     Container.Builder containerBuilder = Container.newBuilder();
-    ContainerResources.Builder containerResources = ContainerResources.newBuilder().setAllocateIP(true);
+    ContainerResources.Builder containerResources =
+        ContainerResources.newBuilder().setAllocateIP(true);
 
     if (cpu != 0) {
       containerResources.setCpu(cpu);
@@ -419,6 +464,10 @@ public class JobDescription {
 
     if (memory != 0) {
       containerResources.setMemoryMB(memory);
+    }
+
+    if (sharedMemory != 0) {
+      containerResources.setShmSizeMB(sharedMemory);
     }
 
     if (disk != 0) {
@@ -441,11 +490,10 @@ public class JobDescription {
     SecurityProfile.Builder securityProfile = SecurityProfile.newBuilder();
 
     if (securityGroups != null && !securityGroups.isEmpty()) {
-      securityGroups.forEach(sg ->
-        {
-          securityProfile.addSecurityGroups(sg);
-        }
-      );
+      securityGroups.forEach(
+          sg -> {
+            securityProfile.addSecurityGroups(sg);
+          });
     }
 
     if (iamProfile != null) {
@@ -460,7 +508,7 @@ public class JobDescription {
 
     Image.Builder imageBuilder = Image.newBuilder();
     imageBuilder.setName(applicationName);
-    if(digest!=null){
+    if (digest != null) {
       imageBuilder.setDigest(digest);
     } else {
       imageBuilder.setTag(version);
@@ -480,12 +528,21 @@ public class JobDescription {
       containerBuilder.putAllEnv(env);
     }
 
-    if (!softConstraints.isEmpty()) {
-      containerBuilder.setSoftConstraints(constraintTransformer(softConstraints));
-    }
+    if (constraints != null) {
+      Constraints.Builder constraintsBuilder = Constraints.newBuilder();
+      containerBuilder.setHardConstraints(
+          constraintsBuilder.putAllConstraints(constraints.getHard()));
+      constraintsBuilder = Constraints.newBuilder();
+      containerBuilder.setSoftConstraints(
+          constraintsBuilder.putAllConstraints(constraints.getSoft()));
+    } else {
+      if (!softConstraints.isEmpty()) {
+        containerBuilder.setSoftConstraints(constraintTransformer(softConstraints));
+      }
 
-    if (!hardConstraints.isEmpty()) {
-      containerBuilder.setHardConstraints(constraintTransformer(hardConstraints));
+      if (!hardConstraints.isEmpty()) {
+        containerBuilder.setHardConstraints(constraintTransformer(hardConstraints));
+      }
     }
 
     jobDescriptorBuilder.setContainer(containerBuilder);
@@ -511,16 +568,40 @@ public class JobDescription {
       com.netflix.titus.grpc.protogen.MigrationPolicy serviceMigrationPolicy;
 
       if (migrationPolicy != null && migrationPolicy.getType().equals("selfManaged")) {
-        serviceMigrationPolicy = com.netflix.titus.grpc.protogen.MigrationPolicy.newBuilder().setSelfManaged(com.netflix.titus.grpc.protogen.MigrationPolicy.SelfManaged.newBuilder().build()).build();
+        serviceMigrationPolicy =
+            com.netflix.titus.grpc.protogen.MigrationPolicy.newBuilder()
+                .setSelfManaged(
+                    com.netflix.titus.grpc.protogen.MigrationPolicy.SelfManaged.newBuilder()
+                        .build())
+                .build();
       } else {
-        serviceMigrationPolicy = com.netflix.titus.grpc.protogen.MigrationPolicy.newBuilder().setSystemDefault(com.netflix.titus.grpc.protogen.MigrationPolicy.SystemDefault.newBuilder().build()).build();
+        serviceMigrationPolicy =
+            com.netflix.titus.grpc.protogen.MigrationPolicy.newBuilder()
+                .setSystemDefault(
+                    com.netflix.titus.grpc.protogen.MigrationPolicy.SystemDefault.newBuilder()
+                        .build())
+                .build();
       }
-
+      com.netflix.titus.grpc.protogen.ServiceJobSpec.ServiceJobProcesses.Builder
+          titusServiceJobProcesses = ServiceJobSpec.ServiceJobProcesses.newBuilder();
+      if (serviceJobProcesses != null) {
+        titusServiceJobProcesses
+            .setDisableDecreaseDesired(serviceJobProcesses.isDisableDecreaseDesired())
+            .setDisableIncreaseDesired(serviceJobProcesses.isDisableIncreaseDesired())
+            .build();
+      }
       jobDescriptorBuilder.setService(
-        ServiceJobSpec.newBuilder().setEnabled(inService)
-          .setCapacity(jobCapacity)
-          .setMigrationPolicy(serviceMigrationPolicy)
-          .setRetryPolicy(RetryPolicy.newBuilder().setExponentialBackOff(RetryPolicy.ExponentialBackOff.newBuilder().setInitialDelayMs(5000).setMaxDelayIntervalMs(300000))));
+          ServiceJobSpec.newBuilder()
+              .setEnabled(inService)
+              .setCapacity(jobCapacity)
+              .setMigrationPolicy(serviceMigrationPolicy)
+              .setServiceJobProcesses(titusServiceJobProcesses)
+              .setRetryPolicy(
+                  RetryPolicy.newBuilder()
+                      .setExponentialBackOff(
+                          RetryPolicy.ExponentialBackOff.newBuilder()
+                              .setInitialDelayMs(5000)
+                              .setMaxDelayIntervalMs(300000))));
     }
 
     if (type.equals("batch")) {
@@ -529,7 +610,9 @@ public class JobDescription {
       if (runtimeLimitSecs != 0) {
         batchJobSpec.setRuntimeLimitSec(runtimeLimitSecs);
       }
-      batchJobSpec.setRetryPolicy(RetryPolicy.newBuilder().setImmediate(RetryPolicy.Immediate.newBuilder().setRetries(retries)));
+      batchJobSpec.setRetryPolicy(
+          RetryPolicy.newBuilder()
+              .setImmediate(RetryPolicy.Immediate.newBuilder().setRetries(retries)));
       jobDescriptorBuilder.setBatch(batchJobSpec);
     }
 
@@ -539,7 +622,122 @@ public class JobDescription {
       jobDescriptorBuilder.setCapacityGroup(capacityGroup);
     }
 
+    if (disruptionBudget != null) {
+      JobDisruptionBudget budget = convertJobDisruptionBudget(disruptionBudget);
+      if (budget != null) {
+        jobDescriptorBuilder.setDisruptionBudget(budget);
+      }
+    }
+
     return jobDescriptorBuilder.build();
+  }
+
+  private JobDisruptionBudget convertJobDisruptionBudget(DisruptionBudget budget) {
+    JobDisruptionBudget.Builder builder = JobDisruptionBudget.newBuilder();
+    if (budget.getAvailabilityPercentageLimit() != null) {
+      builder.setAvailabilityPercentageLimit(
+          JobDisruptionBudget.AvailabilityPercentageLimit.newBuilder()
+              .setPercentageOfHealthyContainers(
+                  budget.availabilityPercentageLimit.getPercentageOfHealthyContainers())
+              .build());
+    }
+    if (budget.getContainerHealthProviders() != null
+        && !budget.getContainerHealthProviders().isEmpty()) {
+      budget
+          .getContainerHealthProviders()
+          .forEach(
+              chp ->
+                  builder.addContainerHealthProviders(
+                      ContainerHealthProvider.newBuilder().setName(chp.getName()).build()));
+    }
+
+    if (budget.getSelfManaged() != null) {
+      builder.setSelfManaged(
+          JobDisruptionBudget.SelfManaged.newBuilder()
+              .setRelocationTimeMs(budget.getSelfManaged().getRelocationTimeMs())
+              .build());
+    }
+
+    if (budget.getRatePercentagePerHour() != null) {
+      builder.setRatePercentagePerHour(
+          JobDisruptionBudget.RatePercentagePerHour.newBuilder()
+              .setMaxPercentageOfContainersRelocatedInHour(
+                  budget.getRatePercentagePerHour().getMaxPercentageOfContainersRelocatedInHour())
+              .build());
+    }
+
+    if (budget.getRatePerInterval() != null) {
+      builder.setRatePerInterval(
+          JobDisruptionBudget.RatePerInterval.newBuilder()
+              .setIntervalMs(budget.getRatePerInterval().getIntervalMs())
+              .setLimitPerInterval(budget.getRatePerInterval().getLimitPerInterval())
+              .build());
+    }
+
+    if (budget.getRatePercentagePerInterval() != null) {
+      builder.setRatePercentagePerInterval(
+          JobDisruptionBudget.RatePercentagePerInterval.newBuilder()
+              .setIntervalMs(budget.getRatePercentagePerInterval().getIntervalMs())
+              .setPercentageLimitPerInterval(
+                  budget.getRatePercentagePerInterval().getPercentageLimitPerInterval())
+              .build());
+    }
+
+    if (budget.getRelocationLimit() != null) {
+      builder.setRelocationLimit(
+          JobDisruptionBudget.RelocationLimit.newBuilder()
+              .setLimit(budget.getRelocationLimit().getLimit()));
+    }
+
+    if (budget.getTimeWindows() != null && !budget.getTimeWindows().isEmpty()) {
+      budget
+          .getTimeWindows()
+          .forEach(
+              tw -> {
+                TimeWindow.Builder timeWindowBuilder = TimeWindow.newBuilder();
+                tw.getDays().forEach(day -> timeWindowBuilder.addDays(convertDay(day)));
+                tw.getHourlyTimeWindows()
+                    .forEach(
+                        htw -> {
+                          timeWindowBuilder.addHourlyTimeWindows(
+                              TimeWindow.HourlyTimeWindow.newBuilder()
+                                  .setEndHour(htw.getEndHour())
+                                  .setStartHour(htw.getStartHour())
+                                  .build());
+                        });
+                timeWindowBuilder.setTimeZone(tw.getTimeZone());
+                builder.addTimeWindows(timeWindowBuilder.build());
+              });
+    }
+
+    if (budget.getUnhealthyTasksLimit() != null) {
+      builder.setUnhealthyTasksLimit(
+          JobDisruptionBudget.UnhealthyTasksLimit.newBuilder()
+              .setLimitOfUnhealthyContainers(
+                  budget.getUnhealthyTasksLimit().getLimitOfUnhealthyContainers())
+              .build());
+    }
+
+    return builder.build();
+  }
+
+  private Day convertDay(String day) {
+    switch (day) {
+      case "Monday":
+        return Day.Monday;
+      case "Tuesday":
+        return Day.Tuesday;
+      case "Wednesday":
+        return Day.Wednesday;
+      case "Thursday":
+        return Day.Thursday;
+      case "Friday":
+        return Day.Friday;
+      case "Saturday":
+        return Day.Saturday;
+      default:
+        return Day.Sunday;
+    }
   }
 
   private MountPerm convertMountPerm(String mountPerm) {
@@ -555,12 +753,10 @@ public class JobDescription {
 
   private Constraints.Builder constraintTransformer(List<String> constraints) {
     Constraints.Builder constraintsBuilder = Constraints.newBuilder();
-    constraints.forEach(constraint ->
-      {
-        constraintsBuilder.putConstraints(constraint, "true");
-      }
-    );
+    constraints.forEach(
+        constraint -> {
+          constraintsBuilder.putConstraints(constraint, "true");
+        });
     return constraintsBuilder;
   }
-
 }

@@ -16,17 +16,15 @@
 
 package com.netflix.spinnaker.clouddriver.artifacts.ivy;
 
-import com.netflix.spinnaker.clouddriver.artifacts.ArtifactCredentialsRepository;
+import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
-import java.util.List;
-import java.util.Objects;
-import java.util.stream.Collectors;
 
 @Configuration
 @ConditionalOnProperty("artifacts.ivy.enabled")
@@ -35,23 +33,20 @@ import java.util.stream.Collectors;
 @Slf4j
 public class IvyArtifactConfiguration {
   private final IvyArtifactProviderProperties ivyArtifactProviderProperties;
-  private final ArtifactCredentialsRepository artifactCredentialsRepository;
 
   @Bean
   List<? extends IvyArtifactCredentials> ivyArtifactCredentials() {
-    return ivyArtifactProviderProperties.getAccounts()
-      .stream()
-      .map(a -> {
-        try {
-          IvyArtifactCredentials c = new IvyArtifactCredentials(a);
-          artifactCredentialsRepository.save(c);
-          return c;
-        } catch (Exception e) {
-          log.warn("Failure instantiating ivy artifact account {}: ", a, e);
-          return null;
-        }
-      })
-      .filter(Objects::nonNull)
-      .collect(Collectors.toList());
+    return ivyArtifactProviderProperties.getAccounts().stream()
+        .map(
+            a -> {
+              try {
+                return new IvyArtifactCredentials(a);
+              } catch (Exception e) {
+                log.warn("Failure instantiating ivy artifact account {}: ", a, e);
+                return null;
+              }
+            })
+        .filter(Objects::nonNull)
+        .collect(Collectors.toList());
   }
 }

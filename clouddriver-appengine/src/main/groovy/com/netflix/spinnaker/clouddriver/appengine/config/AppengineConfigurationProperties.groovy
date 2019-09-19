@@ -47,10 +47,11 @@ class AppengineConfigurationProperties {
     List<String> versions
     List<String> omitServices
     List<String> omitVersions
+    Long cachingIntervalSeconds
 
-    void initialize(AppengineJobExecutor jobExecutor) {
+    void initialize(AppengineJobExecutor jobExecutor, String gcloudPath) {
       if (this.jsonPath) {
-        jobExecutor.runCommand(["gcloud", "auth", "activate-service-account", "--key-file", this.jsonPath])
+        jobExecutor.runCommand([gcloudPath, "auth", "activate-service-account", "--key-file", this.jsonPath])
 
         def accountJson = new JsonSlurper().parse(new File(this.jsonPath))
         this.project = this.project ?: accountJson["project_id"]
@@ -98,4 +99,5 @@ class AppengineConfigurationProperties {
   }
 
   List<ManagedAccount> accounts = []
+  String gcloudPath
 }

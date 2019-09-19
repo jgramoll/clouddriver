@@ -26,9 +26,6 @@ import com.google.api.services.storage.StorageScopes;
 import com.google.api.services.storage.model.Objects;
 import com.google.api.services.storage.model.StorageObject;
 import com.netflix.spinnaker.clouddriver.artifacts.ArtifactUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -39,6 +36,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class GcsStorageService {
   private static final Logger log = LoggerFactory.getLogger(GcsStorageService.class);
@@ -66,23 +65,26 @@ public class GcsStorageService {
 
     public GcsStorageService newForCredentials(String credentialsPath) throws IOException {
       GoogleCredential credential = loadCredential(credentialsPath);
-      Storage storage = new Storage.Builder(transport_, jsonFactory_, credential)
-        .setApplicationName(applicationName_)
-        .build();
+      Storage storage =
+          new Storage.Builder(transport_, jsonFactory_, credential)
+              .setApplicationName(applicationName_)
+              .build();
 
       return new GcsStorageService(storage);
     }
 
     private GoogleCredential loadCredential(String credentialsPath) throws IOException {
       GoogleCredential credential;
-      if (!credentialsPath.isEmpty()) {
+      if (credentialsPath != null && !credentialsPath.isEmpty()) {
         FileInputStream stream = new FileInputStream(credentialsPath);
-        credential = GoogleCredential.fromStream(stream, transport_, jsonFactory_)
-          .createScoped(Collections.singleton(StorageScopes.DEVSTORAGE_READ_ONLY));
+        credential =
+            GoogleCredential.fromStream(stream, transport_, jsonFactory_)
+                .createScoped(Collections.singleton(StorageScopes.DEVSTORAGE_READ_ONLY));
         log.info("Loaded credentials from " + credentialsPath);
       } else {
-        log.info("spinnaker.gcs.enabled without spinnaker.gcs.jsonPath. " +
-          "Using default application credentials. Using default credentials.");
+        log.info(
+            "spinnaker.gcs.enabled without spinnaker.gcs.jsonPath. "
+                + "Using default application credentials. Using default credentials.");
         credential = GoogleCredential.getApplicationDefault();
       }
       return credential;
@@ -95,8 +97,12 @@ public class GcsStorageService {
     storage_ = storage;
   }
 
-  public InputStream openObjectStream(String bucketName, String path) throws IOException {
+  public InputStream openObjectStream(String bucketName, String path, Long generation)
+      throws IOException {
     Storage.Objects.Get get = storage_.objects().get(bucketName, path);
+    if (generation != null) {
+      get.setGeneration(generation);
+    }
     return get.executeMediaAsInputStream();
   }
 
@@ -112,13 +118,14 @@ public class GcsStorageService {
       List<StorageObject> items = objects.getItems();
       if (items != null) {
         for (StorageObject obj : items) {
-          executor.submit(() -> {
-              try {
-                op.visit(obj);
-              } catch (IOException ioex) {
-                throw new IllegalStateException(ioex);
-              }
-          });
+          executor.submit(
+              () -> {
+                try {
+                  op.visit(obj);
+                } catch (IOException ioex) {
+                  throw new IllegalStateException(ioex);
+                }
+              });
         }
       }
       listMethod.setPageToken(objects.getNextPageToken());
@@ -130,7 +137,7 @@ public class GcsStorageService {
         throw new IllegalStateException("Timed out waiting to process StorageObjects.");
       }
     } catch (InterruptedException intex) {
-       throw new IllegalStateException(intex);
+      throw new IllegalStateException(intex);
     }
   }
 
@@ -138,14 +145,14 @@ public class GcsStorageService {
     visitObjects(bucketName, "", op);
   }
 
-  public void downloadStorageObjectRelative(StorageObject obj, String ignorePrefix, String baseDirectory)
-  throws IOException {
-    InputStream stream = openObjectStream(obj.getBucket(), obj.getName());
+  public void downloadStorageObjectRelative(
+      StorageObject obj, String ignorePrefix, String baseDirectory) throws IOException {
+    InputStream stream = openObjectStream(obj.getBucket(), obj.getName(), obj.getGeneration());
     String objPath = obj.getName();
     if (!ignorePrefix.isEmpty()) {
       ignorePrefix += File.separator;
       if (!objPath.startsWith(ignorePrefix)) {
-          throw new IllegalArgumentException(objPath + " does not start with '" + ignorePrefix + "'");
+        throw new IllegalArgumentException(objPath + " does not start with '" + ignorePrefix + "'");
       }
       objPath = objPath.substring(ignorePrefix.length());
     }

@@ -1,25 +1,27 @@
 repositories {
-  maven { url "http://adxsnapshots.azurewebsites.net" }
+  maven { url "https://adxsnapshots.azurewebsites.net" }
 }
 
 dependencies {
-  compile project(":clouddriver-core")
-  compile spinnaker.dependency('frigga')
-  compile spinnaker.dependency('bootActuator')
-  compile spinnaker.dependency('bootWeb')
-  compile 'com.microsoft.azure:adal4j:1.1.2'
-  compile 'com.microsoft.azure:azure:1.0.0-beta1'
-  compile 'com.microsoft.azure:azure-mgmt-compute:1.0.0-beta1'
-  compile 'com.microsoft.azure:azure-mgmt-network:1.0.0-beta1'
-  compile 'com.microsoft.azure:azure-mgmt-storage:1.0.0-beta1'
-  compile 'com.microsoft.azure:azure-mgmt-resources:1.0.0-beta1'
-  compile 'com.microsoft.azure:azure-client-authentication:1.0.0-beta1'
-  compile 'com.microsoft.azure:azure-storage:3.1.0'
-  compile 'com.microsoft.rest:client-runtime:1.0.0-20160309.002843-19'
+  implementation project(":clouddriver-core")
+  implementation project(":clouddriver-security")
+  implementation project(":cats:cats-core")
+
+  implementation "com.netflix.frigga:frigga"
+  implementation "com.netflix.spectator:spectator-api"
+  implementation "com.netflix.spinnaker.fiat:fiat-api:$fiatVersion"
+  implementation "com.netflix.spinnaker.fiat:fiat-core:$fiatVersion"
+  implementation "com.netflix.spinnaker.kork:kork-exceptions"
+  implementation "com.netflix.spinnaker.moniker:moniker"
+  implementation "org.codehaus.groovy:groovy-all"
+  implementation "org.springframework.boot:spring-boot-actuator"
+  implementation "org.springframework.boot:spring-boot-starter-web"
+  implementation 'com.microsoft.azure:adal4j:1.6.3'
+  implementation 'com.microsoft.azure:azure:1.19.0'
+
+  testImplementation "cglib:cglib-nodep"
+  testImplementation "org.objenesis:objenesis"
+  testImplementation "org.spockframework:spock-core"
+  testImplementation "org.spockframework:spock-spring"
+  testImplementation "org.springframework:spring-test"
 }
-
-configurations.all {
-  resolutionStrategy.force 'com.microsoft.rest:client-runtime:1.0.0-20160309.002843-19'
-}
-
-

@@ -169,6 +169,29 @@ class TaskHealthCachingAgentSpec extends Specification {
     taskHealth.getTaskId() == CommonCachingAgent.TASK_ID_1
   }
 
+  def 'should skip tasks with a non-cached container instance'() {
+    given:
+    ObjectMapper mapper = new ObjectMapper()
+    Map<String, Object> containerMap = mapper.convertValue(new Container().withNetworkBindings(new NetworkBinding().withHostPort(1337)), Map.class)
+    def taskAttributes = [
+      taskId              : CommonCachingAgent.TASK_ID_1,
+      taskArn             : CommonCachingAgent.TASK_ARN_1,
+      startedAt           : new Date().getTime(),
+      containerInstanceArn: CommonCachingAgent.CONTAINER_INSTANCE_ARN_2,
+      group               : 'service:' + CommonCachingAgent.SERVICE_NAME_1,
+      containers          : Collections.singletonList(containerMap)
+    ]
+    def taskKey = Keys.getTaskKey(CommonCachingAgent.ACCOUNT, CommonCachingAgent.REGION, CommonCachingAgent.TASK_ID_1)
+    def taskCacheData = new DefaultCacheData(taskKey, taskAttributes, Collections.emptyMap())
+    providerCache.getAll(TASKS.toString(), _) >> Collections.singletonList(taskCacheData)
+
+    when:
+    def taskHealthList = agent.getItems(ecs, providerCache)
+
+    then:
+    taskHealthList == []
+  }
+
   def 'should get a list of task health for aws-vpc mode'() {
     given:
     ObjectMapper mapper = new ObjectMapper()
@@ -218,6 +241,30 @@ class TaskHealthCachingAgentSpec extends Specification {
     taskHealth.getServiceName() == CommonCachingAgent.SERVICE_NAME_1
     taskHealth.getTaskArn() == CommonCachingAgent.TASK_ARN_1
     taskHealth.getTaskId() == CommonCachingAgent.TASK_ID_1
+  }
+
+  def 'should skip tasks with a non-cached task definition and aws-vpc mode'() {
+    given:
+    ObjectMapper mapper = new ObjectMapper()
+    Map<String, Object> containerMap = mapper.convertValue(new Container().withNetworkInterfaces(
+            new NetworkInterface().withPrivateIpv4Address("192.168.0.100")),
+            Map.class)
+    def taskAttributes = [
+            taskId               : CommonCachingAgent.TASK_ID_1,
+            taskArn              : CommonCachingAgent.TASK_ARN_1,
+            startedAt            : new Date().getTime(),
+            group                : 'service:' + CommonCachingAgent.SERVICE_NAME_1,
+            containers           : Collections.singletonList(containerMap)
+    ]
+    def taskKey = Keys.getTaskKey(CommonCachingAgent.ACCOUNT, CommonCachingAgent.REGION, CommonCachingAgent.TASK_ID_1)
+    def taskCacheData = new DefaultCacheData(taskKey, taskAttributes, Collections.emptyMap())
+    providerCache.getAll(TASKS.toString(), _) >> Collections.singletonList(taskCacheData)
+
+    when:
+    def taskHealthList = agent.getItems(ecs, providerCache)
+
+    then:
+    taskHealthList == []
   }
 
   def 'should generate fresh data'() {

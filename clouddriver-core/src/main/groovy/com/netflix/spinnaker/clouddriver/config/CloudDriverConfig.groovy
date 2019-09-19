@@ -18,7 +18,11 @@ package com.netflix.spinnaker.clouddriver.config
 
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.datatype.jdk8.Jdk8Module
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
+import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.netflix.spectator.api.Registry
+import com.netflix.spinnaker.cats.agent.Agent
 import com.netflix.spinnaker.cats.agent.ExecutionInstrumentation
 import com.netflix.spinnaker.cats.agent.NoopExecutionInstrumentation
 import com.netflix.spinnaker.cats.redis.cache.RedisCacheOptions
@@ -26,7 +30,6 @@ import com.netflix.spinnaker.clouddriver.cache.CacheConfig
 import com.netflix.spinnaker.clouddriver.cache.NoopOnDemandCacheUpdater
 import com.netflix.spinnaker.clouddriver.cache.OnDemandCacheUpdater
 import com.netflix.spinnaker.clouddriver.core.CloudProvider
-import com.netflix.spinnaker.clouddriver.core.DynomiteConfig
 import com.netflix.spinnaker.clouddriver.core.NoopAtomicOperationConverter
 import com.netflix.spinnaker.clouddriver.core.NoopCloudProvider
 import com.netflix.spinnaker.clouddriver.core.ProjectClustersService
@@ -72,6 +75,11 @@ import com.netflix.spinnaker.clouddriver.model.SubnetProvider
 import com.netflix.spinnaker.clouddriver.names.NamerRegistry
 import com.netflix.spinnaker.clouddriver.names.NamingStrategy
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperationConverter
+import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperationDescriptionPreProcessor
+import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperationsRegistry
+import com.netflix.spinnaker.clouddriver.orchestration.ExceptionClassifier
+import com.netflix.spinnaker.clouddriver.orchestration.OperationsService
+import com.netflix.spinnaker.clouddriver.saga.SagaEvent
 import com.netflix.spinnaker.clouddriver.search.ApplicationSearchProvider
 import com.netflix.spinnaker.clouddriver.search.NoopSearchProvider
 import com.netflix.spinnaker.clouddriver.search.ProjectSearchProvider
@@ -79,10 +87,12 @@ import com.netflix.spinnaker.clouddriver.search.SearchProvider
 import com.netflix.spinnaker.clouddriver.search.executor.SearchExecutorConfig
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsRepository
+import com.netflix.spinnaker.clouddriver.security.AllowedAccountsValidator
 import com.netflix.spinnaker.clouddriver.security.DefaultAccountCredentialsProvider
 import com.netflix.spinnaker.clouddriver.security.MapBackedAccountCredentialsRepository
 import com.netflix.spinnaker.fiat.shared.FiatPermissionEvaluator
 import com.netflix.spinnaker.kork.core.RetrySupport
+import com.netflix.spinnaker.kork.jackson.ObjectMapperSubtypeConfigurer
 import com.netflix.spinnaker.kork.jedis.RedisClientDelegate
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
@@ -104,12 +114,11 @@ import java.time.Clock
 @Configuration
 @Import([
   RedisConfig,
-  DynomiteConfig,
   CacheConfig,
   SearchExecutorConfig
 ])
 @PropertySource(value = "classpath:META-INF/clouddriver-core.properties", ignoreResourceNotFound = true)
-@EnableConfigurationProperties(ProjectClustersCachingAgentProperties)
+@EnableConfigurationProperties([ProjectClustersCachingAgentProperties, ExceptionClassifierConfigurationProperties])
 class CloudDriverConfig {
 
   @Bean
@@ -126,8 +135,16 @@ class CloudDriverConfig {
         jacksonObjectMapperBuilder.serializationInclusion(JsonInclude.Include.NON_NULL)
         jacksonObjectMapperBuilder.failOnEmptyBeans(false)
         jacksonObjectMapperBuilder.failOnUnknownProperties(false)
+        jacksonObjectMapperBuilder.modules(new Jdk8Module(), new JavaTimeModule(), new KotlinModule())
       }
     }
+  }
+
+  @Bean
+  ObjectMapperSubtypeConfigurer.SubtypeLocator clouddriverSubtypeLocator() {
+    return new ObjectMapperSubtypeConfigurer.ClassSubtypeLocator(SagaEvent, [
+      "com.netflix.spinnaker.clouddriver.orchestration.sagas"
+    ])
   }
 
   @Bean
@@ -136,7 +153,7 @@ class CloudDriverConfig {
   }
 
   @Bean
-  @ConfigurationProperties('serviceLimits')
+  @ConfigurationProperties('service-limits')
   ServiceLimitConfigurationBuilder serviceLimitConfigProperties() {
     return new ServiceLimitConfigurationBuilder()
   }
@@ -297,19 +314,23 @@ class CloudDriverConfig {
   }
 
   @Bean
-  @ConditionalOnExpression('${redis.enabled:true}')
-  CoreProvider coreProvider(RedisCacheOptions redisCacheOptions,
-                            RedisClientDelegate redisClientDelegate,
+  CoreProvider coreProvider(Optional<RedisCacheOptions> redisCacheOptions,
+                            Optional<RedisClientDelegate> redisClientDelegate,
                             ApplicationContext applicationContext,
                             ProjectClustersService projectClustersService,
                             ProjectClustersCachingAgentProperties projectClustersCachingAgentProperties) {
-    return new CoreProvider([
-      new CleanupPendingOnDemandCachesAgent(redisCacheOptions, redisClientDelegate, applicationContext),
+    List<Agent> agents = [
       new ProjectClustersCachingAgent(
         projectClustersService,
         projectClustersCachingAgentProperties
       )
-    ])
+    ]
+
+    if (redisCacheOptions.isPresent() && redisClientDelegate.isPresent()) {
+      agents.add(new CleanupPendingOnDemandCachesAgent(redisCacheOptions.get(), redisClientDelegate.get(), applicationContext))
+    }
+
+    return new CoreProvider(agents)
   }
 
   @Bean
@@ -337,5 +358,10 @@ class CloudDriverConfig {
       objectMapper,
       fiatPermissionEvaluator
     )
+  }
+
+  @Bean
+  ExceptionClassifier exceptionClassifier(ExceptionClassifierConfigurationProperties properties) {
+    return new ExceptionClassifier(properties)
   }
 }

@@ -16,18 +16,21 @@
 
 package com.netflix.spinnaker.clouddriver.orchestration
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.metrics.TimedCallable
 import com.netflix.spinnaker.clouddriver.orchestration.events.OperationEvent
 import com.netflix.spinnaker.clouddriver.orchestration.events.OperationEventHandler
+import com.netflix.spinnaker.kork.exceptions.ExceptionSummary
 import com.netflix.spinnaker.security.AuthenticatedRequest
+import groovy.transform.Canonical
 import groovy.util.logging.Slf4j
 import org.slf4j.MDC
-import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.ApplicationContext
 
+import javax.annotation.Nonnull
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -50,17 +53,28 @@ class DefaultOrchestrationProcessor implements OrchestrationProcessor {
     }
   }
 
-  @Autowired
-  TaskRepository taskRepository
+  private final TaskRepository taskRepository
+  private final ApplicationContext applicationContext
+  private final Registry registry
+  private final Collection<OperationEventHandler> operationEventHandlers
+  private final ObjectMapper objectMapper
+  private final ExceptionClassifier exceptionClassifier
 
-  @Autowired
-  ApplicationContext applicationContext
-
-  @Autowired
-  Registry registry
-
-  @Autowired(required = false)
-  Collection<OperationEventHandler> operationEventHandlers = []
+  DefaultOrchestrationProcessor(
+    TaskRepository taskRepository,
+    ApplicationContext applicationContext,
+    Registry registry,
+    Optional<Collection<OperationEventHandler>> operationEventHandlers,
+    ObjectMapper objectMapper,
+    ExceptionClassifier exceptionClassifier
+  ) {
+    this.taskRepository = taskRepository
+    this.applicationContext = applicationContext
+    this.registry = registry
+    this.operationEventHandlers = operationEventHandlers.orElse([])
+    this.objectMapper = objectMapper
+    this.exceptionClassifier = exceptionClassifier
+  }
 
   @Override
   Task process(List<AtomicOperation> atomicOperations, String clientRequestId) {
@@ -68,11 +82,15 @@ class DefaultOrchestrationProcessor implements OrchestrationProcessor {
     def orchestrationsId = registry.createId('orchestrations')
     def atomicOperationId = registry.createId('operations')
     def tasksId = registry.createId('tasks')
-    def existingTask = taskRepository.getByClientRequestId(clientRequestId)
-    if (existingTask) {
-      return existingTask
+
+    // Get the task (either an existing one, or a new one). If the task already exists, `shouldExecute` will be false
+    // if the task is in a non-failed state, or is not retryable.
+    def result = getTask(clientRequestId)
+    def task = result.task
+    if (!result.shouldExecute) {
+      return task
     }
-    def task = taskRepository.create(TASK_PHASE, "Initializing Orchestration Task...", clientRequestId)
+
     def operationClosure = {
       try {
         // Autowire the atomic operations
@@ -102,8 +120,8 @@ class DefaultOrchestrationProcessor implements OrchestrationProcessor {
             }.call()
           } catch (AtomicOperationException e) {
             task.updateStatus TASK_PHASE, "Orchestration failed: ${atomicOperation.class.simpleName} | ${e.class.simpleName}: [${e.errors.join(', ')}]"
-            task.addResultObjects([[type: "EXCEPTION", operation: atomicOperation.class.simpleName, cause: e.class.simpleName, message: e.errors.join(", ")]])
-            task.fail()
+            task.addResultObjects([extractExceptionSummary(e, e.errors.join(", "), [operation: atomicOperation.class.simpleName])])
+            failTask(task, e)
           } catch (e) {
             def message = e.message
             def stringWriter = new StringWriter()
@@ -114,10 +132,10 @@ class DefaultOrchestrationProcessor implements OrchestrationProcessor {
               message = stackTrace
             }
             task.updateStatus TASK_PHASE, "Orchestration failed: ${atomicOperation.class.simpleName} | ${e.class.simpleName}: [${message}]"
-            task.addResultObjects([[type: "EXCEPTION", operation: atomicOperation.class.simpleName, cause: e.class.simpleName, message: message]])
+            task.addResultObjects([extractExceptionSummary(e, message, [operation: atomicOperation.class.simpleName])])
 
             log.error(stackTrace)
-            task.fail()
+            failTask(task, e)
           }
         }
         task.addResultObjects(results.findResults { it })
@@ -129,15 +147,15 @@ class DefaultOrchestrationProcessor implements OrchestrationProcessor {
         registry.counter(tasksId.withTag("success", "false").withTag("cause", e.class.simpleName)).increment()
         if (e instanceof TimeoutException) {
           task.updateStatus "INIT", "Orchestration timed out."
-          task.addResultObjects([[type: "EXCEPTION", cause: e.class.simpleName, message: "Orchestration timed out."]])
-          task.fail()
+          task.addResultObjects([extractExceptionSummary(e, "Orchestration timed out.")])
+          failTask(task, e)
         } else {
           def stringWriter = new StringWriter()
           def printWriter = new PrintWriter(stringWriter)
           e.printStackTrace(printWriter)
           task.updateStatus("INIT", "Unknown failure -- ${stringWriter.toString()}")
-          task.addResultObjects([[type: "EXCEPTION", cause: e.class.simpleName, message: "Failed for unknown reason."]])
-          task.fail()
+          task.addResultObjects([extractExceptionSummary(e, "Failed for unknown reason.")])
+          failTask(task, e)
         }
       } finally {
         if (!task.status?.isCompleted()) {
@@ -163,11 +181,67 @@ class DefaultOrchestrationProcessor implements OrchestrationProcessor {
    */
   static void resetMDC() {
     try {
-      MDC.remove(AuthenticatedRequest.SPINNAKER_USER)
-      MDC.remove(AuthenticatedRequest.SPINNAKER_ACCOUNTS)
-      MDC.remove(AuthenticatedRequest.SPINNAKER_EXECUTION_ID)
+      MDC.remove(AuthenticatedRequest.Header.USER.header)
+      MDC.remove(AuthenticatedRequest.Header.ACCOUNTS.header)
+      MDC.remove(AuthenticatedRequest.Header.EXECUTION_ID.header)
     } catch (Exception e) {
       log.error("Unable to clear thread locals, reason: ${e.message}")
     }
+  }
+
+  /**
+   * For backwards compatibility.
+   *
+   * TODO(rz): Not 100% sure we should keep these two methods.
+   */
+  Map<String, Object> extractExceptionSummary(Throwable e, String userMessage) {
+    def summary = ExceptionSummary.from(e)
+    Map<String, Object> map = objectMapper.convertValue(summary, Map)
+    map["message"] = userMessage
+    map["type"] = "EXCEPTION"
+    return map
+  }
+
+  /**
+   * For backwards compatibility.
+   *
+   * TODO(rz): Add "additionalFields" to ExceptionSummary?
+   */
+  Map<String, Object> extractExceptionSummary(Throwable e, String userMessage, Map<String, Object> additionalFields) {
+    Map<String, Object> summary = extractExceptionSummary(e, userMessage)
+    summary.putAll(additionalFields)
+    return summary
+  }
+
+  @Nonnull
+  private GetTaskResult getTask(String clientRequestId) {
+    def existingTask = taskRepository.getByClientRequestId(clientRequestId)
+    if (existingTask) {
+      if (!existingTask.isRetryable()) {
+        return new GetTaskResult(existingTask, false)
+      }
+      existingTask.updateStatus(TASK_PHASE, "Re-initializing Orchestration Task")
+      existingTask.retry()
+      return new GetTaskResult(existingTask, true)
+    }
+    return new GetTaskResult(
+      taskRepository.create(TASK_PHASE, "Initializing Orchestration Task", clientRequestId),
+      true
+    )
+  }
+
+  private void failTask(@Nonnull Task task, @Nonnull Exception e) {
+    if (task.hasSagaIds()) {
+      task.fail(exceptionClassifier.isRetryable(e))
+    } else {
+      // Tasks that are not Saga-backed are automatically assumed to not be retryable.
+      task.fail(false)
+    }
+  }
+
+  @Canonical
+  private static class GetTaskResult {
+    Task task
+    boolean shouldExecute
   }
 }

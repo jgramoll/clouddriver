@@ -16,11 +16,14 @@
 
 package com.netflix.spinnaker.clouddriver.azure.resources.servergroup.model
 
-import com.microsoft.azure.management.compute.models.VirtualMachineScaleSet
+import com.google.common.collect.Sets
+import com.microsoft.azure.management.compute.VirtualMachineScaleSetDataDisk
+import com.microsoft.azure.management.compute.implementation.VirtualMachineScaleSetInner
 import com.netflix.frigga.Names
 import com.netflix.spinnaker.clouddriver.azure.AzureCloudProvider
 import com.netflix.spinnaker.clouddriver.azure.common.AzureUtilities
 import com.netflix.spinnaker.clouddriver.azure.resources.common.AzureResourceOpsDescription
+import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.AzureLoadBalancer
 import com.netflix.spinnaker.clouddriver.azure.resources.vmimage.model.AzureNamedImage
 import com.netflix.spinnaker.clouddriver.model.HealthState
 import com.netflix.spinnaker.clouddriver.model.Instance
@@ -36,6 +39,7 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
   Set<String> loadBalancers
   Set<String> securityGroups
   Set<String> zones
+  Map<String, String> instanceTags /* custom tags specified by user */
   final String type = AzureCloudProvider.ID
   final String cloudProvider = AzureCloudProvider.ID
   Map<String, Object> launchConfig
@@ -45,6 +49,7 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
 
   UpgradePolicy upgradePolicy
   String loadBalancerName
+  String loadBalancerType
   String appGatewayName
   String appGatewayBapId
   AzureNamedImage image
@@ -64,6 +69,8 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
   Boolean hasNewSubnet = false
   Boolean createNewSubnet = false
   AzureExtensionCustomScriptSettings customScriptsSettings
+  Boolean enableInboundNAT = false
+  List<VirtualMachineScaleSetDataDisk> dataDisks
 
   static class AzureScaleSetSku {
     String name
@@ -93,7 +100,7 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
   }
 
   Integer getStorageAccountCount() {
-    (sku.capacity / 20) + 1
+    (int)(sku.capacity / 20) + 1
   }
 
   static UpgradePolicy getPolicyFromMode(String mode) {
@@ -110,12 +117,14 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
 
   @Override
   Set<String> getLoadBalancers() {
-    return [this.appGatewayName]
+    if(this.appGatewayName != null) return Sets.newHashSet(this.appGatewayName)
+    if(this.loadBalancerName != null) return Sets.newHashSet(this.loadBalancerName)
+    new HashSet<String>()
   }
 
   @Override
   Set<String> getSecurityGroups() {
-    return [this.securityGroupName]
+    return this.securityGroupName == null ? new HashSet<String>() : Sets.newHashSet(this.securityGroupName)
   }
 
   @Override
@@ -140,14 +149,14 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
     new ServerGroup.Capacity(
       min: 1,
       max: instances ? instances.size() : 1,
-      desired: 1 //TODO (scotm) figure out how these should be set correctly
+      desired: instances ? instances.size() : 1
     )
   }
 
-  static AzureServerGroupDescription build(VirtualMachineScaleSet scaleSet) {
+  static AzureServerGroupDescription build(VirtualMachineScaleSetInner scaleSet) {
     def azureSG = new AzureServerGroupDescription()
-    azureSG.name = scaleSet.name
-    def parsedName = Names.parseName(scaleSet.name)
+    azureSG.name = scaleSet.name()
+    def parsedName = Names.parseName(scaleSet.name())
     // Get the values from the tags if they exist
     azureSG.tags = scaleSet.tags ? scaleSet.tags : [:]
     // favor tag settings then Frigga name parser
@@ -158,7 +167,9 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
     azureSG.clusterName = scaleSet.tags?.cluster ?: parsedName.cluster
     azureSG.securityGroupName = scaleSet.tags?.securityGroupName
     azureSG.loadBalancerName = scaleSet.tags?.loadBalancerName
+    azureSG.enableInboundNAT = scaleSet.tags?.enableInboundNAT
     azureSG.appGatewayName = scaleSet.tags?.appGatewayName
+    azureSG.loadBalancerType = azureSG.appGatewayName != null ? AzureLoadBalancer.AzureLoadBalancerType.AZURE_APPLICATION_GATEWAY.toString() : AzureLoadBalancer.AzureLoadBalancerType.AZURE_LOAD_BALANCER.toString()
     azureSG.appGatewayBapId = scaleSet.tags?.appGatewayBapId
     // TODO: appGatewayBapId can be retrieved via scaleSet->networkProfile->networkInterfaceConfigurations->ipConfigurations->ApplicationGatewayBackendAddressPools
     azureSG.subnetId = scaleSet.tags?.subnetId
@@ -179,37 +190,39 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
       if (storageNames) azureSG.storageAccountNames.addAll(storageNames.split(","))
     }
 
-    azureSG.region = scaleSet.location
-    azureSG.upgradePolicy = getPolicyFromMode(scaleSet.upgradePolicy.mode)
+    azureSG.region = scaleSet.location()
+    azureSG.upgradePolicy = getPolicyFromMode(scaleSet.upgradePolicy().mode().name())
 
     // Get the image reference data
-    def imgRef = scaleSet.virtualMachineProfile?.storageProfile?.imageReference
+    def storageProfile = scaleSet.virtualMachineProfile()?.storageProfile()
+    def imgRef = storageProfile?.imageReference()
     if (imgRef) {
-      azureSG.image.offer = imgRef.offer
-      azureSG.image.publisher = imgRef.publisher
-      azureSG.image.sku = imgRef.sku
-      azureSG.image.version = imgRef.version
+      azureSG.image.offer = imgRef.offer()
+      azureSG.image.publisher = imgRef.publisher()
+      azureSG.image.sku = imgRef.sku()
+      azureSG.image.version = imgRef.version()
     }
+
+    azureSG.dataDisks = storageProfile?.dataDisks()
 
     // get the OS configuration data
     def osConfig = new AzureOperatingSystemConfig()
-    def osProfile = scaleSet?.virtualMachineProfile?.osProfile
+    def osProfile = scaleSet?.virtualMachineProfile()?.osProfile()
     if (osProfile) {
-      osConfig.adminPassword = osProfile.adminPassword
-      osConfig.adminUserName = osProfile.adminUsername
-      osConfig.computerNamePrefix = osProfile.computerNamePrefix
-      osConfig.customData = osProfile.customData
-
+      osConfig.adminPassword = osProfile.adminPassword()
+      osConfig.adminUserName = osProfile.adminUsername()
+      osConfig.computerNamePrefix = osProfile.computerNamePrefix()
+      osConfig.customData = osProfile.customData()
     }
     azureSG.osConfig = osConfig
 
     def customScriptSettings = new AzureExtensionCustomScriptSettings()
-    def extensionProfile = scaleSet?.virtualMachineProfile?.extensionProfile
+    def extensionProfile = scaleSet?.virtualMachineProfile()?.extensionProfile()
     if (extensionProfile) {
-      def customScriptExtensionSettings = extensionProfile.extensions.find({
-          it.type == AzureUtilities.AZURE_CUSTOM_SCRIPT_EXT_TYPE_LINUX ||
-          it.type == AzureUtilities.AZURE_CUSTOM_SCRIPT_EXT_TYPE_WINDOWS
-      })?.settings
+      def customScriptExtensionSettings = extensionProfile.extensions().find({
+          it.type() == AzureUtilities.AZURE_CUSTOM_SCRIPT_EXT_TYPE_LINUX ||
+          it.type() == AzureUtilities.AZURE_CUSTOM_SCRIPT_EXT_TYPE_WINDOWS
+      })?.settings()
       //def customScriptExtensionSettings = extensionProfile.extensions.find({it.type=="CustomScript"}).settings
       if (customScriptExtensionSettings) {
         customScriptSettings = mapper.convertValue(customScriptExtensionSettings, AzureExtensionCustomScriptSettings)
@@ -219,21 +232,23 @@ class AzureServerGroupDescription extends AzureResourceOpsDescription implements
     azureSG.customScriptsSettings = customScriptSettings
 
     def sku = new AzureScaleSetSku()
-    def skuData = scaleSet.sku
+    def skuData = scaleSet.sku()
     if (skuData) {
-      sku.capacity = skuData.capacity
-      sku.name = skuData.name
-      sku.tier = skuData.tier
+      sku.capacity = skuData.capacity()
+      sku.name = skuData.name()
+      sku.tier = skuData.tier()
     }
     azureSG.sku = sku
+    def zones = scaleSet.zones()
+    azureSG.zones = zones == null ? new HashSet<>() : zones.toSet()
 
-    azureSG.provisioningState = scaleSet.provisioningState
+    azureSG.provisioningState = scaleSet.provisioningState()
 
     azureSG
   }
 
-  static Collection<Instance> filterInstancesByHealthState(Set<Instance> instances, HealthState healthState) {
-    instances?.findAll { Instance it -> it.getHealthState() == healthState }
+  static Collection<Instance> filterInstancesByHealthState(Set<? extends Instance> instances, HealthState healthState) {
+    (Collection<Instance>) instances?.findAll { Instance it -> it.getHealthState() == healthState }
   }
 
   void addInboundPortConfig(String name, int startRange, int endRange, String protocol, int backendPort) {

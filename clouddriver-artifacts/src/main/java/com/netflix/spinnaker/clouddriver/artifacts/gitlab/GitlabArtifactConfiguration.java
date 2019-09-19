@@ -16,19 +16,16 @@
 
 package com.netflix.spinnaker.clouddriver.artifacts.gitlab;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.netflix.spinnaker.clouddriver.artifacts.ArtifactCredentialsRepository;
 import com.squareup.okhttp.OkHttpClient;
+import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
-import java.util.List;
-import java.util.Objects;
-import java.util.stream.Collectors;
 
 @Configuration
 @ConditionalOnProperty("artifacts.gitlab.enabled")
@@ -37,29 +34,20 @@ import java.util.stream.Collectors;
 @Slf4j
 public class GitlabArtifactConfiguration {
   private final GitlabArtifactProviderProperties gitlabArtifactProviderProperties;
-  private final ArtifactCredentialsRepository artifactCredentialsRepository;
-  private final ObjectMapper objectMapper;
 
   @Bean
-  OkHttpClient gitlabOkHttpClient() {
-    return new OkHttpClient();
-  }
-
-  @Bean
-  List<? extends GitlabArtifactCredentials> gitlabArtifactCredentials(OkHttpClient gitlabOkHttpClient) {
-    return gitlabArtifactProviderProperties.getAccounts()
-      .stream()
-      .map(a -> {
-        try {
-          GitlabArtifactCredentials c = new GitlabArtifactCredentials(a, gitlabOkHttpClient, objectMapper);
-          artifactCredentialsRepository.save(c);
-          return c;
-        } catch (Exception e) {
-          log.warn("Failure instantiating Gitlab artifact account {}: ", a, e);
-          return null;
-        }
-      })
-      .filter(Objects::nonNull)
-      .collect(Collectors.toList());
+  List<? extends GitlabArtifactCredentials> gitlabArtifactCredentials(OkHttpClient okHttpClient) {
+    return gitlabArtifactProviderProperties.getAccounts().stream()
+        .map(
+            a -> {
+              try {
+                return new GitlabArtifactCredentials(a, okHttpClient);
+              } catch (Exception e) {
+                log.warn("Failure instantiating Gitlab artifact account {}: ", a, e);
+                return null;
+              }
+            })
+        .filter(Objects::nonNull)
+        .collect(Collectors.toList());
   }
 }

@@ -19,11 +19,13 @@ package com.netflix.spinnaker.clouddriver.google.provider.view
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.google.common.base.Strings
 import com.netflix.spinnaker.cats.cache.Cache
 import com.netflix.spinnaker.cats.cache.CacheData
 import com.netflix.spinnaker.cats.cache.RelationshipCacheFilter
 import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
+import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
 import com.netflix.spinnaker.clouddriver.google.model.GoogleHealthCheck
 import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
 import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
@@ -52,21 +54,30 @@ class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalan
 
   @Override
   Set<GoogleLoadBalancerView> getApplicationLoadBalancers(String application) {
-    def pattern = Keys.getLoadBalancerKey("*", "*", "${application}*")
-    def identifiers = cacheView.filterIdentifiers(LOAD_BALANCERS.ns, pattern)
+    String pattern = Keys.getLoadBalancerKey("*", "*", "${application}*")
+    Set<String> identifiers = cacheView.filterIdentifiers(LOAD_BALANCERS.ns, pattern).toSet()
 
-    def applicationServerGroups = cacheView.getAll(
+    // It is possible to configure a server group in application A to use a load balancer from
+    // application B. Therefore, if (and only if) we have not already retrieved load balancer
+    // identifiers for all applications, we need to retrieve identifiers for every load balancer
+    // associated with a server group from this application.
+    if (!Strings.isNullOrEmpty(application)) {
+      Collection<CacheData> applicationServerGroups = cacheView.getAll(
         SERVER_GROUPS.ns,
         cacheView.filterIdentifiers(SERVER_GROUPS.ns, "${GoogleCloudProvider.ID}:*:${application}-*")
-    )
-    applicationServerGroups.each { CacheData serverGroup ->
-      identifiers.addAll(serverGroup.relationships[LOAD_BALANCERS.ns] ?: [])
+      )
+      applicationServerGroups.each { CacheData serverGroup ->
+        Collection<String> relatedLoadBalancers = serverGroup.relationships[LOAD_BALANCERS.ns] ?: []
+        relatedLoadBalancers.each { String lb ->
+          identifiers.add(lb)
+        }
+      }
     }
 
     // TODO(duftler): De-frigga this.
 
     cacheView.getAll(LOAD_BALANCERS.ns,
-                     identifiers.unique(),
+                     identifiers,
                      RelationshipCacheFilter.include(SERVER_GROUPS.ns, INSTANCES.ns)).collect { CacheData loadBalancerCacheData ->
       loadBalancersFromCacheData(loadBalancerCacheData, (loadBalancerCacheData?.relationships?.get(INSTANCES.ns) ?: []) as Set)
     } as Set
@@ -114,7 +125,7 @@ class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalan
       switch (loadBalancer.type) {
         case GoogleLoadBalancerType.HTTP:
           def isDisabledFromHttp = Utils.determineHttpLoadBalancerDisabledState(loadBalancer, serverGroup)
-          isDisabled = serverGroup.asg.get(GoogleServerGroup.View.REGIONAL_LOAD_BALANCER_NAMES) ? // We assume these are L4 load balancers, and the state has been calculated on the way to the cache.
+          isDisabled = serverGroup.asg.get(GCEUtil.REGIONAL_LOAD_BALANCER_NAMES) ? // We assume these are L4 load balancers, and the state has been calculated on the way to the cache.
             isDisabledFromHttp && serverGroup.disabled : isDisabledFromHttp
           break
         case GoogleLoadBalancerType.INTERNAL:
@@ -126,12 +137,12 @@ class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalan
           break
         case GoogleLoadBalancerType.SSL:
           def isDisabledFromSsl = Utils.determineSslLoadBalancerDisabledState(loadBalancer, serverGroup)
-          isDisabled = serverGroup.asg.get(GoogleServerGroup.View.REGIONAL_LOAD_BALANCER_NAMES) ? // We assume these are L4 load balancers, and the state has been calculated on the way to the cache.
+          isDisabled = serverGroup.asg.get(GCEUtil.REGIONAL_LOAD_BALANCER_NAMES) ? // We assume these are L4 load balancers, and the state has been calculated on the way to the cache.
             isDisabledFromSsl && serverGroup.disabled : isDisabledFromSsl
           break
         case GoogleLoadBalancerType.TCP:
           def isDisabledFromTcp = Utils.determineTcpLoadBalancerDisabledState(loadBalancer, serverGroup)
-          isDisabled = serverGroup.asg.get(GoogleServerGroup.View.REGIONAL_LOAD_BALANCER_NAMES) ? // We assume these are L4 load balancers, and the state has been calculated on the way to the cache.
+          isDisabled = serverGroup.asg.get(GCEUtil.REGIONAL_LOAD_BALANCER_NAMES) ? // We assume these are L4 load balancers, and the state has been calculated on the way to the cache.
             isDisabledFromTcp && serverGroup.disabled : isDisabledFromTcp
           break
         default:
@@ -145,6 +156,7 @@ class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalan
           isDisabled: isDisabled,
           detachedInstances: [],
           instances: [],
+          cloudProvider: GoogleCloudProvider.ID,
       )
 
       // TODO(duftler): De-frigga this.

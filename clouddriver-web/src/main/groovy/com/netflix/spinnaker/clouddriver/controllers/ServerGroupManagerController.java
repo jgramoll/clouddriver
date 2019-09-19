@@ -20,21 +20,19 @@ package com.netflix.spinnaker.clouddriver.controllers;
 import com.netflix.spinnaker.clouddriver.model.ServerGroupManager;
 import com.netflix.spinnaker.clouddriver.model.ServerGroupManagerProvider;
 import com.netflix.spinnaker.clouddriver.requestqueue.RequestQueue;
+import java.util.Collection;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.security.access.prepost.PostAuthorize;
 import org.springframework.security.access.prepost.PostFilter;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
-
-import java.util.Collection;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
@@ -45,24 +43,27 @@ public class ServerGroupManagerController {
   final RequestQueue requestQueue;
 
   @Autowired
-  public ServerGroupManagerController(List<ServerGroupManagerProvider> serverGroupManagerProviders, RequestQueue requestQueue) {
+  public ServerGroupManagerController(
+      List<ServerGroupManagerProvider> serverGroupManagerProviders, RequestQueue requestQueue) {
     this.serverGroupManagerProviders = serverGroupManagerProviders;
     this.requestQueue = requestQueue;
   }
 
   @PreAuthorize("hasPermission(#application, 'APPLICATION', 'READ')")
-  @PostFilter("hasPermission(filterObject.account, 'ACCOUNT', 'READ')" )
+  @PostFilter("hasPermission(filterObject.account, 'ACCOUNT', 'READ')")
   @RequestMapping(method = RequestMethod.GET)
   Set<ServerGroupManager> getForApplication(@PathVariable String application) {
     return serverGroupManagerProviders.stream()
-        .map(provider -> {
-          try {
-            return requestQueue.execute(application, () -> provider.getServerGroupManagersByApplication(application));
-          } catch (Throwable t) {
-            log.warn("Failed to read server group managers" , t);
-            return null;
-          }
-        })
+        .map(
+            provider -> {
+              try {
+                return requestQueue.execute(
+                    application, () -> provider.getServerGroupManagersByApplication(application));
+              } catch (Throwable t) {
+                log.warn("Failed to read server group managers", t);
+                return null;
+              }
+            })
         .filter(Objects::nonNull)
         .flatMap(Collection::stream)
         .map(i -> (ServerGroupManager) i)

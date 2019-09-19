@@ -105,6 +105,32 @@ class EcsCreateServergroupDescriptionValidatorSpec extends AbstractValidatorSpec
     0 * errors.rejectValue(_, _)
   }
 
+  void 'should pass without load balancer'() {
+    given:
+    def description = getDescription()
+    description.containerPort = null
+    description.targetGroup = null
+    def errors = Mock(Errors)
+
+    when:
+    validator.validate([], description, errors)
+
+    then:
+    0 * errors.rejectValue(_, _)
+  }
+
+  void '(with artifact) should fail when load balancer specified but loadBalanced container missing'() {
+    given:
+    def description = getDescription()
+    description.useTaskDefinitionArtifact = true
+    def errors = Mock(Errors)
+
+    when:
+    validator.validate([], description, errors)
+
+    then:
+    1 * errors.rejectValue('loadBalancedContainer', "${getDescriptionName()}.loadBalancedContainer.not.nullable")
+  }
 
   @Override
   AbstractECSDescription getNulledDescription() {

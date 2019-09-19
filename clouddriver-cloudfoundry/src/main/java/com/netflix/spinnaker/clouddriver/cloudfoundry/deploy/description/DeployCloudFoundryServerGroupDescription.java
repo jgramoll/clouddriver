@@ -20,32 +20,30 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.netflix.spinnaker.clouddriver.artifacts.config.ArtifactCredentials;
 import com.netflix.spinnaker.clouddriver.cloudfoundry.model.CloudFoundrySpace;
 import com.netflix.spinnaker.kork.artifacts.model.Artifact;
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.EqualsAndHashCode;
-import lombok.NoArgsConstructor;
-
-import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
+import javax.annotation.Nullable;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
-public class DeployCloudFoundryServerGroupDescription extends AbstractCloudFoundryServerGroupDescription {
+public class DeployCloudFoundryServerGroupDescription
+    extends AbstractCloudFoundryServerGroupDescription {
   private String accountName;
   private String application;
   private String stack;
-  private String detail;
+  private String freeFormDetails;
   private CloudFoundrySpace space;
+  private boolean startApplication;
+  private Artifact applicationArtifact;
+  private Artifact manifest;
+  private String executionId;
+  private Map<String, Object> trigger;
 
-  @JsonIgnore
-  private Artifact artifact;
+  @JsonIgnore private ArtifactCredentials artifactCredentials;
 
-  @JsonIgnore
-  private ArtifactCredentials artifactCredentials;
-
-  @JsonIgnore
-  private ApplicationAttributes applicationAttributes;
+  @JsonIgnore private ApplicationAttributes applicationAttributes;
 
   @Data
   public static class ApplicationAttributes {
@@ -53,22 +51,16 @@ public class DeployCloudFoundryServerGroupDescription extends AbstractCloudFound
     private String memory;
     private String diskQuota;
 
-    @Nullable
-    private String healthCheckType;
+    @Nullable private String healthCheckType;
 
-    @Nullable
-    private String healthCheckHttpEndpoint;
+    @Nullable private String healthCheckHttpEndpoint;
 
-    @Nullable
-    private List<String> routes;
+    @Nullable private List<String> routes;
 
-    @Nullable
-    private List<String> buildpacks;
+    @Nullable private List<String> buildpacks;
 
-    @Nullable
-    private Map<String, String> env;
+    @Nullable private Map<String, String> env;
 
-    @Nullable
-    private List<String> services;
+    @Nullable private List<String> services;
   }
 }

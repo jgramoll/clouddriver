@@ -18,17 +18,17 @@ package com.netflix.spinnaker.clouddriver.cloudfoundry.provider.view;
 
 import com.netflix.spinnaker.clouddriver.cloudfoundry.CloudFoundryCloudProvider;
 import com.netflix.spinnaker.clouddriver.cloudfoundry.model.CloudFoundryService;
-import com.netflix.spinnaker.clouddriver.cloudfoundry.servicebroker.ServiceProvider;
 import com.netflix.spinnaker.clouddriver.cloudfoundry.security.CloudFoundryCredentials;
+import com.netflix.spinnaker.clouddriver.model.ServiceInstance;
+import com.netflix.spinnaker.clouddriver.model.ServiceProvider;
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider;
+import java.util.Collection;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.util.Collection;
-
 @Component
 public class CloudFoundryServiceProvider implements ServiceProvider {
-  final private AccountCredentialsProvider accountCredentialsProvider;
+  private final AccountCredentialsProvider accountCredentialsProvider;
 
   @Autowired
   public CloudFoundryServiceProvider(AccountCredentialsProvider accountCredentialsProvider) {
@@ -37,11 +37,20 @@ public class CloudFoundryServiceProvider implements ServiceProvider {
 
   @Override
   public Collection<CloudFoundryService> getServices(String account, String region) {
-    CloudFoundryCredentials credentials = (CloudFoundryCredentials) accountCredentialsProvider.getCredentials(account);
+    CloudFoundryCredentials credentials =
+        (CloudFoundryCredentials) accountCredentialsProvider.getCredentials(account);
+    return credentials.getCredentials().getServiceInstances().findAllServicesByRegion(region);
+  }
+
+  @Override
+  public ServiceInstance getServiceInstance(
+      String account, String region, String serviceInstanceName) {
+    CloudFoundryCredentials credentials =
+        (CloudFoundryCredentials) accountCredentialsProvider.getCredentials(account);
     return credentials
-      .getCredentials()
-      .getServiceInstances()
-      .findAllServicesByRegion(region);
+        .getCredentials()
+        .getServiceInstances()
+        .getServiceInstance(region, serviceInstanceName);
   }
 
   @Override

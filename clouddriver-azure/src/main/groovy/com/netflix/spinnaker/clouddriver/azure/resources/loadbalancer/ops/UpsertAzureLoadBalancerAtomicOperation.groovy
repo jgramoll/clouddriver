@@ -17,7 +17,7 @@
 package com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.ops
 
 import com.microsoft.azure.CloudException
-import com.microsoft.azure.management.resources.models.DeploymentExtended
+import com.microsoft.azure.management.resources.Deployment
 import com.netflix.spinnaker.clouddriver.azure.common.AzureUtilities
 import com.netflix.spinnaker.clouddriver.azure.resources.common.model.AzureDeploymentOperation
 import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.AzureLoadBalancerDescription
@@ -52,24 +52,48 @@ class UpsertAzureLoadBalancerAtomicOperation implements AtomicOperation<Map> {
       "in ${description.region}...")
 
     def errList = new ArrayList<String>()
-    String resourceGroupName = AzureUtilities.getResourceGroupName(description.appName, description.region)
+    String resourceGroupName = null
 
     try {
 
       task.updateStatus(BASE_PHASE, "Beginning load balancer deployment")
 
-      DeploymentExtended deployment = description.credentials.resourceManagerClient.createResourceFromTemplate(
+      resourceGroupName = AzureUtilities.getResourceGroupName(description.appName, description.region)
+      // Create corresponding ResourceGroup if it's not created already
+      description.credentials.resourceManagerClient.initializeResourceGroupAndVNet(resourceGroupName, null, description.region)
+
+      if(description.dnsName) {
+        if(description.dnsName.isBlank()){
+          throw new RuntimeException("Specified dns name $description.dnsName cannot be blank")
+        }
+
+        // Check dns name conflict
+        def isDnsNameAvailable = description.credentials.networkClient.checkDnsNameAvailability(description.dnsName)
+        if (!isDnsNameAvailable) {
+          throw new RuntimeException("Specified dns name $description.dnsName has conflict")
+        }
+      }
+
+      description.name = description.loadBalancerName
+      def loadBalancerDescription = description.credentials.networkClient.getLoadBalancer(resourceGroupName, description.name)
+
+      if(loadBalancerDescription) {
+        description.serverGroups = loadBalancerDescription.serverGroups
+        description.trafficEnabledSG = loadBalancerDescription.trafficEnabledSG
+        description.publicIpName = loadBalancerDescription.publicIpName
+      }
+      Deployment deployment = description.credentials.resourceManagerClient.createResourceFromTemplate(
         AzureLoadBalancerResourceTemplate.getTemplate(description),
         resourceGroupName,
         description.region,
         description.loadBalancerName,
         "loadBalancer")
 
-      errList = AzureDeploymentOperation.checkDeploymentOperationStatus(task, BASE_PHASE, description.credentials, resourceGroupName, deployment.name)
+      errList = AzureDeploymentOperation.checkDeploymentOperationStatus(task, BASE_PHASE, description.credentials, resourceGroupName, deployment.name())
     } catch (CloudException ce) {
       task.updateStatus(BASE_PHASE, "One or more deployment operations have failed. Please see Azure portal for more information. Resource Group: ${resourceGroupName} Load Balancer: ${description.loadBalancerName}")
       errList.add(ce.message)
-    } catch (Exception e) {
+    } catch (Throwable e) {
       task.updateStatus(BASE_PHASE, "Deployment of load balancer ${description.loadBalancerName} failed: ${e.message}. Please see Azure Portal for more information")
       errList.add(e.message)
     }

@@ -16,16 +16,19 @@
 
 package com.netflix.spinnaker.clouddriver.cloudfoundry.deploy.ops;
 
+import static com.netflix.spinnaker.clouddriver.cloudfoundry.client.model.v2.LastOperation.Type.UPDATE;
+
+import com.netflix.spinnaker.clouddriver.cloudfoundry.client.model.ServiceInstanceResponse;
 import com.netflix.spinnaker.clouddriver.cloudfoundry.deploy.description.DeployCloudFoundryServiceDescription;
 import com.netflix.spinnaker.clouddriver.data.task.Task;
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository;
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
 
-import java.util.List;
-
 @RequiredArgsConstructor
-public class DeployCloudFoundryServiceAtomicOperation implements AtomicOperation<Void> {
+public class DeployCloudFoundryServiceAtomicOperation
+    implements AtomicOperation<ServiceInstanceResponse> {
   private static final String PHASE = "DEPLOY_SERVICE";
   private final DeployCloudFoundryServiceDescription description;
 
@@ -34,42 +37,59 @@ public class DeployCloudFoundryServiceAtomicOperation implements AtomicOperation
   }
 
   @Override
-  public Void operate(List priorOutputs) {
+  public ServiceInstanceResponse operate(List priorOutputs) {
     Task task = getTask();
-    switch (description.getServiceType()) {
-      case "service":
-        DeployCloudFoundryServiceDescription.ServiceAttributes serviceAttributes = description.getServiceAttributes();
-        task.updateStatus(PHASE, "Creating service instance '" + serviceAttributes.getServiceName() + "' from service " + serviceAttributes.getService() + " and service plan " + serviceAttributes.getServicePlan());
-        description
-          .getClient()
-          .getServiceInstances()
-          .createServiceInstance(
-            serviceAttributes.getServiceName(),
-            serviceAttributes.getService(),
-            serviceAttributes.getServicePlan(),
-            serviceAttributes.getTags(),
-            serviceAttributes.getParameterMap(),
-            description.getSpace(),
-            description.getTimeout());
-        task.updateStatus(PHASE, "Created service instance '" + serviceAttributes.getServiceName() + "'");
-        break;
-      case "userProvided":
-        DeployCloudFoundryServiceDescription.UserProvidedServiceAttributes userProvidedServiceAttributes = description.getUserProvidedServiceAttributes();
-        task.updateStatus(PHASE, "Creating user provided service instance '" + userProvidedServiceAttributes.getServiceName() + "'");
-        description
-          .getClient()
-          .getServiceInstances()
-          .createUserProvidedServiceInstance(
-            userProvidedServiceAttributes.getServiceName(),
-            userProvidedServiceAttributes.getSyslogDrainUrl(),
-            userProvidedServiceAttributes.getTags(),
-            userProvidedServiceAttributes.getCredentialsMap(),
-            userProvidedServiceAttributes.getRouteServiceUrl(),
-            description.getSpace()
-          );
-        task.updateStatus(PHASE, "Created user provided service instance '" + userProvidedServiceAttributes.getServiceName() + "'");
-        break;
+    final ServiceInstanceResponse serviceInstanceResponse;
+    final String serviceInstanceName;
+    if (!description.isUserProvided()) {
+      DeployCloudFoundryServiceDescription.ServiceAttributes serviceAttributes =
+          description.getServiceAttributes();
+      serviceInstanceName = serviceAttributes.getServiceInstanceName();
+      serviceInstanceResponse =
+          description
+              .getClient()
+              .getServiceInstances()
+              .createServiceInstance(
+                  serviceInstanceName,
+                  serviceAttributes.getService(),
+                  serviceAttributes.getServicePlan(),
+                  serviceAttributes.getTags(),
+                  serviceAttributes.getParameterMap(),
+                  serviceAttributes.isUpdatable(),
+                  description.getSpace());
+      String gerund = serviceInstanceResponse.getType() == UPDATE ? "Updating" : "Creating";
+      task.updateStatus(
+          PHASE,
+          gerund
+              + " service instance '"
+              + serviceInstanceName
+              + "' from service "
+              + serviceAttributes.getService()
+              + " and service plan "
+              + serviceAttributes.getServicePlan());
+    } else {
+      DeployCloudFoundryServiceDescription.UserProvidedServiceAttributes
+          userProvidedServiceAttributes = description.getUserProvidedServiceAttributes();
+      serviceInstanceName = userProvidedServiceAttributes.getServiceInstanceName();
+      task.updateStatus(
+          PHASE, "Creating user-provided service instance '" + serviceInstanceName + "'");
+      serviceInstanceResponse =
+          description
+              .getClient()
+              .getServiceInstances()
+              .createUserProvidedServiceInstance(
+                  serviceInstanceName,
+                  userProvidedServiceAttributes.getSyslogDrainUrl(),
+                  userProvidedServiceAttributes.getTags(),
+                  userProvidedServiceAttributes.getCredentials(),
+                  userProvidedServiceAttributes.getRouteServiceUrl(),
+                  userProvidedServiceAttributes.isUpdatable(),
+                  description.getSpace());
+      String verb = serviceInstanceResponse.getType() == UPDATE ? "Updated" : "Created";
+      task.updateStatus(
+          PHASE, verb + " user-provided service instance '" + serviceInstanceName + "'");
     }
-    return null;
+
+    return serviceInstanceResponse;
   }
 }

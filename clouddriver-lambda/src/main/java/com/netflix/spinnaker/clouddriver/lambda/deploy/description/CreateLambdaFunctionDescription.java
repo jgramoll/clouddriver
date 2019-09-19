@@ -16,19 +16,18 @@
 
 package com.netflix.spinnaker.clouddriver.lambda.deploy.description;
 
+import java.util.List;
+import java.util.Map;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
-
-import java.util.Map;
-import java.util.List;
 
 @Data
 @EqualsAndHashCode(callSuper = false)
 public class CreateLambdaFunctionDescription extends AbstractLambdaFunctionDescription {
   String functionName;
   String description;
-  String s3Bucket;
-  String s3Key;
+  String s3bucket;
+  String s3key;
   String handler;
   String role;
   String runtime;
@@ -36,7 +35,7 @@ public class CreateLambdaFunctionDescription extends AbstractLambdaFunctionDescr
   Integer memory;
   Integer timeout;
 
-  List<Map<String,String>> tags;
+  List<Map<String, String>> tags;
 
   Boolean publish;
 }

@@ -17,17 +17,18 @@
 package com.netflix.spinnaker.config
 
 import com.netflix.spectator.api.Registry
-import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
+import com.netflix.spinnaker.clouddriver.event.SpinnakerEvent
+import com.netflix.spinnaker.clouddriver.saga.config.SagaAutoConfiguration
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsRepository
 import com.netflix.spinnaker.clouddriver.titus.TitusClientProvider
+import com.netflix.spinnaker.clouddriver.titus.client.SimpleGrpcChannelFactory
 import com.netflix.spinnaker.clouddriver.titus.client.TitusJobCustomizer
 import com.netflix.spinnaker.clouddriver.titus.client.TitusRegion
 import com.netflix.spinnaker.clouddriver.titus.client.model.GrpcChannelFactory
 import com.netflix.spinnaker.clouddriver.titus.credentials.NetflixTitusCredentials
-import com.netflix.spinnaker.clouddriver.titus.deploy.handlers.TitusDeployHandler
-import com.netflix.spinnaker.clouddriver.titus.health.TitusHealthIndicator
-import com.netflix.spinnaker.clouddriver.titus.client.SimpleGrpcChannelFactory
 import com.netflix.spinnaker.kork.core.RetrySupport
+import com.netflix.spinnaker.kork.jackson.ObjectMapperSubtypeConfigurer
+import com.netflix.spinnaker.kork.jackson.ObjectMapperSubtypeConfigurer.SubtypeLocator
 import groovy.util.logging.Slf4j
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
@@ -36,6 +37,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.ComponentScan
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Import
 
 import java.util.regex.Pattern
 
@@ -43,6 +45,7 @@ import java.util.regex.Pattern
 @ConditionalOnProperty('titus.enabled')
 @EnableConfigurationProperties
 @ComponentScan('com.netflix.spinnaker.clouddriver.titus')
+@Import(SagaAutoConfiguration)
 @Slf4j
 class TitusConfiguration {
 
@@ -73,16 +76,6 @@ class TitusConfiguration {
   @Bean
   TitusClientProvider titusClientProvider(Registry registry, Optional<List<TitusJobCustomizer>> titusJobCustomizers, GrpcChannelFactory grpcChannelFactory, RetrySupport retrySupport) {
     return new TitusClientProvider(registry, titusJobCustomizers.orElse(Collections.emptyList()), grpcChannelFactory, retrySupport)
-  }
-
-  @Bean
-  TitusDeployHandler titusDeployHandler(TitusClientProvider titusClientProvider, AccountCredentialsRepository accountCredentialsRepository) {
-    new TitusDeployHandler(titusClientProvider, accountCredentialsRepository)
-  }
-
-  @Bean
-  TitusHealthIndicator titusHealthIndicator(AccountCredentialsProvider accountCredentialsProvider, TitusClientProvider titusClientProvider) {
-    new TitusHealthIndicator(accountCredentialsProvider, titusClientProvider)
   }
 
   @Bean
@@ -124,5 +117,13 @@ class TitusConfiguration {
       Integer port
       List<String> featureFlags
     }
+  }
+
+  @Bean
+  SubtypeLocator titusEventSubtypeLocator() {
+    return new ObjectMapperSubtypeConfigurer.ClassSubtypeLocator(
+      SpinnakerEvent.class,
+      Collections.singletonList("com.netflix.spinnaker.clouddriver.titus")
+    );
   }
 }

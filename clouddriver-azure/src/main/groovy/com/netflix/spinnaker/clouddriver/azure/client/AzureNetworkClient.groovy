@@ -18,22 +18,13 @@ package com.netflix.spinnaker.clouddriver.azure.client
 
 import com.microsoft.azure.CloudException
 import com.microsoft.azure.credentials.ApplicationTokenCredentials
-import com.microsoft.azure.management.network.ApplicationGatewaysOperations
-import com.microsoft.azure.management.network.LoadBalancersOperations
-import com.microsoft.azure.management.network.NetworkManagementClient
-import com.microsoft.azure.management.network.NetworkManagementClientImpl
-import com.microsoft.azure.management.network.NetworkSecurityGroupsOperations
-import com.microsoft.azure.management.network.PublicIPAddressesOperations
-import com.microsoft.azure.management.network.SubnetsOperations
-import com.microsoft.azure.management.network.VirtualNetworksOperations
-import com.microsoft.azure.management.network.models.AddressSpace
-import com.microsoft.azure.management.network.models.ApplicationGatewayBackendAddressPool
-import com.microsoft.azure.management.network.models.DhcpOptions
-import com.microsoft.azure.management.network.models.NetworkSecurityGroup
-import com.microsoft.azure.management.network.models.PublicIPAddress
-import com.microsoft.azure.management.network.models.Subnet
-import com.microsoft.azure.management.network.models.VirtualNetwork
-
+import com.microsoft.azure.management.network.LoadBalancer
+import com.microsoft.azure.management.network.LoadBalancerInboundNatPool
+import com.microsoft.azure.management.network.LoadBalancingRule
+import com.microsoft.azure.management.network.Network
+import com.microsoft.azure.management.network.PublicIPAddress
+import com.microsoft.azure.management.network.TransportProtocol
+import com.microsoft.azure.management.network.implementation.NetworkSecurityGroupInner
 import com.microsoft.rest.ServiceResponse
 import com.netflix.frigga.Names
 import com.netflix.spinnaker.clouddriver.azure.common.AzureUtilities
@@ -43,37 +34,23 @@ import com.netflix.spinnaker.clouddriver.azure.resources.network.model.AzureVirt
 import com.netflix.spinnaker.clouddriver.azure.resources.securitygroup.model.AzureSecurityGroupDescription
 import com.netflix.spinnaker.clouddriver.azure.resources.subnet.model.AzureSubnetDescription
 import com.netflix.spinnaker.clouddriver.azure.templates.AzureAppGatewayResourceTemplate
+import com.netflix.spinnaker.clouddriver.azure.templates.AzureLoadBalancerResourceTemplate
+import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
-import okhttp3.logging.HttpLoggingInterceptor
 
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
+
+@CompileStatic
 @Slf4j
 class AzureNetworkClient extends AzureBaseClient {
-
-  private final NetworkManagementClient client
+  private final Integer NAT_POOL_PORT_START = 50000
+  private final Integer NAT_POOL_PORT_END = 59999
+  private final Integer NAT_POOL_PORT_NUMBER_PER_POOL = 100
 
   AzureNetworkClient(String subscriptionId, ApplicationTokenCredentials credentials, String userAgentApplicationName) {
-    super(subscriptionId, userAgentApplicationName)
-    this.client = initializeClient(credentials)
+    super(subscriptionId, userAgentApplicationName, credentials)
   }
-
-  @Lazy
-  private LoadBalancersOperations loadBalancerOps = { client.getLoadBalancersOperations() }()
-
-  @Lazy
-  private ApplicationGatewaysOperations appGatewayOps = { client.getApplicationGatewaysOperations() }()
-
-  @Lazy
-  private VirtualNetworksOperations virtualNetworksOperations = { client.getVirtualNetworksOperations() }()
-
-  @Lazy
-  private SubnetsOperations subnetOperations = { client.getSubnetsOperations() }()
-
-  @Lazy
-  private NetworkSecurityGroupsOperations networkSecurityGroupOperations = { client.getNetworkSecurityGroupsOperations() }()
-
-  @Lazy
-  private PublicIPAddressesOperations publicIPAddressOperations = {client.getPublicIPAddressesOperations() }()
-
 
   /**
    * Retrieve a collection of all load balancer for a give set of credentials and the location
@@ -84,22 +61,24 @@ class AzureNetworkClient extends AzureBaseClient {
     def result = new ArrayList<AzureLoadBalancerDescription>()
 
     try {
-      def loadBalancers = executeOp({loadBalancerOps.listAll()})?.body
+      def loadBalancers = executeOp({
+        azure.loadBalancers().list()
+      })
       def currentTime = System.currentTimeMillis()
-      loadBalancers?.each {item ->
-        if (item.location == region) {
+      loadBalancers?.each { item ->
+        if (item.inner().location() == region) {
           try {
-            def lbItem = AzureLoadBalancerDescription.build(item)
+            def lbItem = AzureLoadBalancerDescription.build(item.inner())
             lbItem.dnsName = getDnsNameForPublicIp(
-              AzureUtilities.getResourceGroupNameFromResourceId(item.id),
-              AzureUtilities.getNameFromResourceId(item.frontendIPConfigurations?.first()?.getPublicIPAddress()?.id)
+              AzureUtilities.getResourceGroupNameFromResourceId(item.id()),
+              AzureUtilities.getNameFromResourceId(item.publicIPAddressIds()?.first())
             )
             lbItem.lastReadTime = currentTime
             result += lbItem
           } catch (RuntimeException re) {
             // if we get a runtime exception here, log it but keep processing the rest of the
             // load balancers
-            log.error("Unable to process load balancer ${item.name}: ${re.message}")
+            log.error("Unable to process load balancer ${item.name()}: ${re.message}")
           }
         }
       }
@@ -119,12 +98,14 @@ class AzureNetworkClient extends AzureBaseClient {
   AzureLoadBalancerDescription getLoadBalancer(String resourceGroupName, String loadBalancerName) {
     try {
       def currentTime = System.currentTimeMillis()
-      def item = executeOp({loadBalancerOps.get(resourceGroupName, loadBalancerName, null)})?.body
+      def item = executeOp({
+        azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+      })
       if (item) {
-        def lbItem = AzureLoadBalancerDescription.build(item)
+        def lbItem = AzureLoadBalancerDescription.build(item.inner())
         lbItem.dnsName = getDnsNameForPublicIp(
-          AzureUtilities.getResourceGroupNameFromResourceId(item.id),
-          AzureUtilities.getNameFromResourceId(item.frontendIPConfigurations?.first()?.getPublicIPAddress()?.id)
+          AzureUtilities.getResourceGroupNameFromResourceId(item.id()),
+          AzureUtilities.getNameFromResourceId(item.publicIPAddressIds()?.first())
         )
         lbItem.lastReadTime = currentTime
         return lbItem
@@ -143,16 +124,16 @@ class AzureNetworkClient extends AzureBaseClient {
    * @return a ServiceResponse object
    */
   ServiceResponse deleteLoadBalancer(String resourceGroupName, String loadBalancerName) {
-    def loadBalancer = executeOp({loadBalancerOps.get(resourceGroupName, loadBalancerName, null)})?.body
+    def loadBalancer = azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
 
-    if (loadBalancer?.frontendIPConfigurations?.size() != 1) {
+    if (loadBalancer?.publicIPAddressIds()?.size() != 1) {
       throw new RuntimeException("Unexpected number of public IP addresses associated with the load balancer (should always be only one)!")
     }
 
-    def publicIpAddressName = AzureUtilities.getNameFromResourceId(loadBalancer.frontendIPConfigurations.first().getPublicIPAddress().id)
+    def publicIpAddressName = AzureUtilities.getNameFromResourceId(loadBalancer.publicIPAddressIds()?.first())
 
     deleteAzureResource(
-      loadBalancerOps.&delete,
+      azure.loadBalancers().&deleteByResourceGroup,
       resourceGroupName,
       loadBalancerName,
       null,
@@ -173,7 +154,7 @@ class AzureNetworkClient extends AzureBaseClient {
   ServiceResponse deletePublicIp(String resourceGroupName, String publicIpName) {
 
     deleteAzureResource(
-      publicIPAddressOperations.&delete,
+      azure.publicIPAddresses().&deleteByResourceGroup,
       resourceGroupName,
       publicIpName,
       null,
@@ -191,12 +172,14 @@ class AzureNetworkClient extends AzureBaseClient {
   AzureAppGatewayDescription getAppGateway(String resourceGroupName, String appGatewayName) {
     try {
       def currentTime = System.currentTimeMillis()
-      def appGateway = executeOp({appGatewayOps.get(resourceGroupName, appGatewayName)})?.body
+      def appGateway = executeOp({
+        azure.applicationGateways().getByResourceGroup(resourceGroupName, appGatewayName)
+      })
       if (appGateway) {
-        def agItem = AzureAppGatewayDescription.getDescriptionForAppGateway(appGateway)
+        def agItem = AzureAppGatewayDescription.getDescriptionForAppGateway(appGateway.inner())
         agItem.dnsName = getDnsNameForPublicIp(
-          AzureUtilities.getResourceGroupNameFromResourceId(appGateway.id),
-          AzureUtilities.getNameFromResourceId(appGateway.frontendIPConfigurations?.first()?.getPublicIPAddress()?.id)
+          AzureUtilities.getResourceGroupNameFromResourceId(appGateway.id()),
+          AzureUtilities.getNameFromResourceId(appGateway.defaultPublicFrontend().publicIPAddressId())
         )
         agItem.lastReadTime = currentTime
         return agItem
@@ -218,22 +201,24 @@ class AzureNetworkClient extends AzureBaseClient {
 
     try {
       def currentTime = System.currentTimeMillis()
-      def appGateways = executeOp({appGatewayOps.listAll()})?.body
+      def appGateways = executeOp({
+        azure.applicationGateways().list()
+      })
 
-      appGateways.each {item ->
-        if (item.location == region) {
+      appGateways.each { item ->
+        if (item.inner().location() == region) {
           try {
-            def agItem = AzureAppGatewayDescription.getDescriptionForAppGateway(item)
+            def agItem = AzureAppGatewayDescription.getDescriptionForAppGateway(item.inner())
             agItem.dnsName = getDnsNameForPublicIp(
-              AzureUtilities.getResourceGroupNameFromResourceId(item.id),
-              AzureUtilities.getNameFromResourceId(item.frontendIPConfigurations?.first()?.getPublicIPAddress()?.id)
+              AzureUtilities.getResourceGroupNameFromResourceId(item.id()),
+              AzureUtilities.getNameFromResourceId(item.defaultPublicFrontend().publicIPAddressId())
             )
             agItem.lastReadTime = currentTime
             result << agItem
           } catch (RuntimeException re) {
             // if we get a runtime exception here, log it but keep processing the rest of the
             // load balancers
-            log.error("Unable to process application gateway ${item.name}: ${re.message}")
+            log.error("Unable to process application gateway ${item.name()}: ${re.message}")
           }
         }
       }
@@ -252,21 +237,23 @@ class AzureNetworkClient extends AzureBaseClient {
    */
   ServiceResponse deleteAppGateway(String resourceGroupName, String appGatewayName) {
     ServiceResponse result
-    def appGateway = executeOp({appGatewayOps.get(resourceGroupName, appGatewayName)})?.body
+    def appGateway = executeOp({
+      azure.applicationGateways().getByResourceGroup(resourceGroupName, appGatewayName)
+    })
 
-    if (appGateway?.tags?.cluster) {
+    if (appGateway?.tags()?.cluster) {
       // The selected can not be deleted because there are active server groups associated with
-      def errMsg = "Failed to delete ${appGatewayName}; the application gateway is still associated with server groups in ${appGateway.tags.cluster} cluster"
+      def errMsg = "Failed to delete ${appGatewayName}; the application gateway is still associated with server groups in ${appGateway?.tags()?.cluster} cluster. Please delete associated server groups before deleting the load balancer."
       log.error(errMsg)
       throw new RuntimeException(errMsg)
     }
 
     // TODO: retrieve private IP address name when support for it is added
     // First item in the application gateway frontend IP configurations is the public IP address we are loking for
-    def publicIpAddressName = AzureUtilities.getNameFromResourceId(appGateway?.frontendIPConfigurations?.first()?.getPublicIPAddress()?.id)
+    def publicIpAddressName = AzureUtilities.getNameFromResourceId(appGateway?.defaultPublicFrontend().publicIPAddressId())
 
     result = deleteAzureResource(
-      appGatewayOps.&delete,
+      azure.applicationGateways().&deleteByResourceGroup,
       resourceGroupName,
       appGatewayName,
       null,
@@ -289,10 +276,12 @@ class AzureNetworkClient extends AzureBaseClient {
    * @return a resource id for the backend address pool that got created or null/Runtime Exception if something went wrong
    */
   String createAppGatewayBAPforServerGroup(String resourceGroupName, String appGatewayName, String serverGroupName) {
-    def appGateway = executeOp({appGatewayOps.get(resourceGroupName, appGatewayName)})?.body
+    def appGateway = executeOp({
+      azure.applicationGateways().getByResourceGroup(resourceGroupName, appGatewayName)
+    })
 
     if (appGateway) {
-      def agDescription = AzureAppGatewayDescription.getDescriptionForAppGateway(appGateway)
+      def agDescription = AzureAppGatewayDescription.getDescriptionForAppGateway(appGateway.inner())
       def parsedName = Names.parseName(serverGroupName)
 
       if (!agDescription || (agDescription.cluster && agDescription.cluster != parsedName.cluster)) {
@@ -304,22 +293,24 @@ class AzureNetworkClient extends AzureBaseClient {
       }
 
       // the application gateway must have an backend address pool list (even if it might be empty)
-      if (!appGateway.backendAddressPools.find {it.name == serverGroupName}) {
-        appGateway.backendAddressPools.add(new ApplicationGatewayBackendAddressPool(name: serverGroupName))
+      if (!appGateway.backends()?.containsKey(serverGroupName)) {
         if (agDescription.serverGroups) {
           agDescription.serverGroups << serverGroupName
         } else {
           agDescription.serverGroups = [serverGroupName]
         }
-        appGateway.tags.cluster = parsedName.cluster
-        // TODO: debug only; remove this as part of the cleanup
-        appGateway.tags.serverGroups = agDescription.serverGroups.join(" ")
-        log.info("Adding backend address pool to ${appGateway.name} for server group ${serverGroupName}")
-        executeOp({appGatewayOps.createOrUpdate(resourceGroupName, appGatewayName, appGateway)})
-        log.info("Backend address pool added")
+
+        appGateway.update()
+          .withTag("cluster", parsedName.cluster)
+          .withTag("serverGroups", agDescription.serverGroups.join(" "))
+          .defineBackend(serverGroupName)
+          .attach()
+          .apply()
+
+        log.info("Adding backend address pool to ${appGateway.name()} for server group ${serverGroupName}")
       }
 
-      return "${appGateway.id}/backendAddressPools/${serverGroupName}"
+      return "${appGateway.id()}/backendAddressPools/${serverGroupName}"
     }
 
     null
@@ -333,40 +324,249 @@ class AzureNetworkClient extends AzureBaseClient {
    * @return a resource id for the backend address pool that was removed or null/Runtime Exception if something went wrong
    */
   String removeAppGatewayBAPforServerGroup(String resourceGroupName, String appGatewayName, String serverGroupName) {
-    def appGateway = executeOp({appGatewayOps.get(resourceGroupName, appGatewayName)})?.body
+    def appGateway = executeOp({
+      azure.applicationGateways().getByResourceGroup(resourceGroupName, appGatewayName)
+    })
 
     if (appGateway) {
-      def agDescription = AzureAppGatewayDescription.getDescriptionForAppGateway(appGateway)
+      def agDescription = AzureAppGatewayDescription.getDescriptionForAppGateway(appGateway.inner())
 
       if (!agDescription) {
         def errMsg = "Failed to disassociate ${serverGroupName} from ${appGatewayName}; could not find ${appGatewayName}"
         log.error(errMsg)
         throw new RuntimeException(errMsg)
       }
-      def agBAP = appGateway.backendAddressPools?.find { it.name == serverGroupName}
+      def agBAP = appGateway.backends().get(serverGroupName)
       if (agBAP) {
-        appGateway.backendAddressPools.remove(agBAP)
-        if (appGateway.backendAddressPools.size() == 1) {
+        def chain = appGateway.update()
+          .withoutBackend(agBAP.name())
+        if (appGateway.backends().size() == 1) {
           // There are no server groups assigned to ths application gateway; we can make it available now
-          appGateway.tags.remove("cluster")
+          chain = chain.withoutTag("cluster")
         }
 
         // TODO: debug only; remove this as part of the cleanup
         agDescription.serverGroups?.remove(serverGroupName)
         if (!agDescription.serverGroups || agDescription.serverGroups.isEmpty()) {
-          appGateway.tags.remove("serverGroups")
+          chain = chain.withoutTag("serverGroups")
         } else {
-          appGateway.tags.remove("serverGroups")
-          appGateway.tags.serverGroups = agDescription.serverGroups.join(" ")
+          chain = chain.withTag("serverGroups", agDescription.serverGroups.join(" "))
         }
 
-        executeOp({appGatewayOps.createOrUpdate(resourceGroupName, appGatewayName, appGateway)})
+        chain.apply()
       }
 
-      return "${appGateway.id}/backendAddressPools/${serverGroupName}"
+      return "${appGateway.id()}/backendAddressPools/${serverGroupName}"
     }
 
     null
+  }
+
+  /**
+   * It creates the server group corresponding backend address pool entry in the selected load balancer
+   *  This will be later used as a parameter in the create server group deployment template
+   * @param resourceGroupName the name of the resource group to look into
+   * @param loadBalancerName the of the application gateway
+   * @param serverGroupName the of the application gateway
+   * @return a resource id for the backend address pool that got created or null/Runtime Exception if something went wrong
+   */
+  String createLoadBalancerAPforServerGroup(String resourceGroupName, String loadBalancerName, String serverGroupName) {
+    def loadBalancer = executeOp({
+      azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+    })
+
+    if(loadBalancer) {
+      // the application gateway must have an backend address pool list (even if it might be empty)
+      if (!loadBalancer.backends()?.containsKey(serverGroupName)) {
+        String sgTag = loadBalancer.tags().get("serverGroups")
+        sgTag = sgTag == null || sgTag.length() == 0 ? serverGroupName : sgTag + " " + serverGroupName
+        loadBalancer.update()
+          .withTag("serverGroups", sgTag)
+          .defineBackend(serverGroupName)
+          .attach()
+          .apply()
+
+        log.info("Adding backend address pool to ${loadBalancer.name()} for server group ${serverGroupName}")
+      }
+
+      return "${loadBalancer.id()}/backendAddressPools/${serverGroupName}"
+    } else {
+      throw new RuntimeException("Load balancer ${loadBalancerName} not found in resource group ${resourceGroupName}")
+    }
+
+    return null
+  }
+
+  /**
+   * It removes the server group corresponding backend address pool item from the selected load balancer (see disable/destroy server group op)
+   * @param resourceGroupName the name of the resource group to look into
+   * @param loadBalancerName the name of the load balancer
+   * @param serverGroupName the name of the server group
+   * @return a resource id for the backend address pool that was removed or null/Runtime Exception if something went wrong
+   */
+  String removeLoadBalancerAPforServerGroup(String resourceGroupName, String loadBalancerName, String serverGroupName) {
+    def loadBalancer = executeOp({
+      azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+    })
+
+    if (loadBalancer) {
+      def lbAP = loadBalancer.backends().get(serverGroupName)
+      if (lbAP) {
+        def chain = loadBalancer.update()
+          .withoutBackend(lbAP.name())
+
+        String sgTag = loadBalancer.tags().get("serverGroups")
+        String[] tags = sgTag.split(" ")
+        String newTag = ""
+        for(String tag: tags) {
+          if(!tag.equals(serverGroupName)) {
+            newTag = newTag.length() == 0 ? tag : newTag + " " + tag
+          }
+        }
+
+        if (newTag.length() == 0) {
+          chain = chain.withoutTag("serverGroups")
+        } else {
+          chain = chain.withTag("serverGroups", newTag)
+        }
+
+        chain.apply()
+      }
+
+      return "${loadBalancer.id()}/backendAddressPools/${serverGroupName}"
+    } else {
+      throw new RuntimeException("Load balancer ${loadBalancerName} not found in resource group ${resourceGroupName}")
+    }
+
+    null
+  }
+
+  /**
+   * It creates the server group corresponding nat pool entry in the selected load balancer
+   *  This will be later used as a parameter in the create server group deployment template
+   * @param resourceGroupName the name of the resource group to look into
+   * @param loadBalancerName the of the application gateway
+   * @param serverGroupName the of the application gateway
+   * @return a resource id for the nat pool that got created or null/Runtime Exception if something went wrong
+   */
+  String createLoadBalancerNatPoolPortRangeforServerGroup(String resourceGroupName, String loadBalancerName, String serverGroupName) {
+    def loadBalancer = executeOp({
+      azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+    })
+
+    if (loadBalancer) {
+      // Fetch the front end name, which will be used in NAT pool. If no front end configured, return null
+      Set<String> frontEndSet = loadBalancer.frontends().keySet()
+      if(frontEndSet.size() == 0) {
+        return null
+      }
+      String frontEndName = frontEndSet.iterator().next()
+      // the application gateway must have an backend address pool list (even if it might be empty)
+      List<int[]> usedPortList = new ArrayList<>()
+      for(LoadBalancerInboundNatPool pool : loadBalancer.inboundNatPools().values()) {
+        int[] range = new int[2]
+        range[0] = pool.frontendPortRangeStart()
+        range[1] = pool.frontendPortRangeEnd()
+        usedPortList.add(range)
+      }
+      usedPortList.sort(true, new Comparator<int[]>() {
+        @Override
+        int compare(int[] o1, int[] o2) {
+          return o1[0] - o2[0]
+        }
+      })
+
+      if (loadBalancer.inboundNatPools()?.containsKey(serverGroupName)) {
+        return loadBalancer.inboundNatPools().get(serverGroupName).inner().id()
+      }
+      int portStart = findUnusedPortsRange(usedPortList, NAT_POOL_PORT_START, NAT_POOL_PORT_END, NAT_POOL_PORT_NUMBER_PER_POOL)
+      if(portStart == -1) {
+        throw new RuntimeException("Load balancer ${loadBalancerName} does not have unused port between ${NAT_POOL_PORT_START} and ${NAT_POOL_PORT_END} with length ${NAT_POOL_PORT_NUMBER_PER_POOL}")
+      }
+
+      // The purpose of the following code is to create an NAT pool in an existing Azure Load Balancer
+      // However Azure Java SDK doesn't provide a way to do this
+      // Use reflection to modify the backend of load balancer
+      LoadBalancerInboundNatPool.UpdateDefinitionStages.WithAttach< LoadBalancer.Update> update = loadBalancer.update()
+        .defineInboundNatPool(serverGroupName)
+        .withProtocol(TransportProtocol.TCP)
+
+      try {
+        Method setRangeMethod = update.getClass().getMethod("fromFrontendPortRange", int.class, int.class)
+        setRangeMethod.setAccessible(true)
+        setRangeMethod.invoke(update, portStart, portStart + NAT_POOL_PORT_NUMBER_PER_POOL - 1)
+
+        Method setBackendPortMethod = update.getClass().getMethod("fromFrontend", String.class)
+        setBackendPortMethod.setAccessible(true)
+        setBackendPortMethod.invoke(update, frontEndName)
+
+        Method setFrontendMethod = update.getClass().getMethod("toBackendPort", int.class)
+        setFrontendMethod.setAccessible(true)
+        setFrontendMethod.invoke(update, 22)
+      } catch (NoSuchMethodException e) {
+        log.error("Failed to use reflection to create NAT pool in Load Balancer, detail: {}", e.getMessage())
+        return null
+      } catch (IllegalAccessException e) {
+        log.error("Failed to use reflection to create NAT pool in Load Balancer, detail: {}", e.getMessage())
+        return null
+      } catch (InvocationTargetException e) {
+        log.error("Failed to use reflection to create NAT pool in Load Balancer, detail: {}", e.getMessage())
+        return null
+      }
+
+      update.attach().apply()
+      return loadBalancer.inboundNatPools().get(serverGroupName).inner().id()
+
+    } else {
+      throw new RuntimeException("Load balancer ${loadBalancerName} not found in resource group ${resourceGroupName}")
+    }
+
+    null
+  }
+
+  // Find unused port range. The usedList is the type List<int[]> whose element is int[2]{portStart, portEnd}
+  // The usedList needs to be sorted in asc order for the element[0]
+  private int findUnusedPortsRange(List<int[]> usedList, int start, int end, int targetLength) {
+    int ret = start
+    int retEnd = ret + targetLength
+    if (retEnd > end) return -1
+    for (int[] p : usedList) {
+      if(p[0] > retEnd) return ret
+      ret = p[1] + 1
+      retEnd = ret + targetLength
+      if (retEnd > end) return -1
+    }
+    return ret
+  }
+
+  /**
+   * It removes the server group corresponding nat pool entry in the selected load balancer
+   *  This will be later used as a parameter in the create server group deployment template
+   * @param resourceGroupName the name of the resource group to look into
+   * @param loadBalancerName the of the application gateway
+   * @param serverGroupName the of the application gateway
+   * @return a resource id for the nat pool that got created or null/Runtime Exception if something went wrong
+   */
+  String removeLoadBalancerNatPoolPortRangeforServerGroup(String resourceGroupName, String loadBalancerName, String serverGroupName) {
+    def loadBalancer = executeOp({
+      azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+    })
+
+    String id
+    if (loadBalancer) {
+      if (loadBalancer.inboundNatPools()?.containsKey(serverGroupName)) {
+        id = loadBalancer.inboundNatPools().get(serverGroupName).inner().id()
+
+        loadBalancer.update()
+          .withoutInboundNatPool(serverGroupName)
+          .apply()
+
+      } else {
+        throw new RuntimeException("Load balancer nat pool ${serverGroupName} not found in load balancer ${loadBalancerName}")
+      }
+    }
+
+    id
   }
 
   /**
@@ -376,28 +576,32 @@ class AzureNetworkClient extends AzureBaseClient {
    * @param serverGroupName name of the server group to be enabled
    * @return a ServiceResponse object
    */
-  ServiceResponse enableServerGroup(String resourceGroupName, String appGatewayName, String serverGroupName) {
-    def appGateway = executeOp({appGatewayOps.get(resourceGroupName, appGatewayName)})?.body
+  void enableServerGroup(String resourceGroupName, String appGatewayName, String serverGroupName) {
+    def appGateway = executeOp({
+      azure.applicationGateways().getByResourceGroup(resourceGroupName, appGatewayName)
+    })
 
     if (appGateway) {
-      def agBAP = appGateway.backendAddressPools?.find { it.name == serverGroupName}
+      def agBAP = appGateway.backends().get(serverGroupName)
       if (!agBAP) {
         def errMsg = "Backend address pool ${serverGroupName} not found in ${appGatewayName}"
         log.error(errMsg)
         throw new RuntimeException(errMsg)
       }
 
-      appGateway.requestRoutingRules.each {
-        it.backendAddressPool.id = agBAP.id
+      appGateway.requestRoutingRules().each { name, rule ->
+        appGateway.update()
+          .updateRequestRoutingRule(name)
+          .toBackend(agBAP.name())
+          .parent()
+          .apply()
       }
 
       // Store active server group in the tags map to ease debugging the operation; we could probably remove this later on
-      appGateway.tags.trafficEnabledSG = serverGroupName
-
-      return executeOp({appGatewayOps.createOrUpdate(resourceGroupName, appGatewayName, appGateway)})
+      appGateway.update()
+        .withTag("trafficEnabledSG", serverGroupName)
+        .apply()
     }
-
-    null
   }
 
   /**
@@ -407,18 +611,20 @@ class AzureNetworkClient extends AzureBaseClient {
    * @param serverGroupName name of the server group to be disabled
    * @return a ServiceResponse object (null if no updates were performed)
    */
-  ServiceResponse disableServerGroup(String resourceGroupName, String appGatewayName, String serverGroupName) {
-    def appGateway = executeOp({appGatewayOps.get(resourceGroupName, appGatewayName)})?.body
+  void disableServerGroup(String resourceGroupName, String appGatewayName, String serverGroupName) {
+    def appGateway = executeOp({
+      azure.applicationGateways().getByResourceGroup(resourceGroupName, appGatewayName)
+    })
 
     if (appGateway) {
-      def defaultBAP = appGateway.backendAddressPools?.find { it.name == AzureAppGatewayResourceTemplate.defaultAppGatewayBeAddrPoolName }
+      def defaultBAP = appGateway.backends().get(AzureAppGatewayResourceTemplate.defaultAppGatewayBeAddrPoolName)
       if (!defaultBAP) {
         def errMsg = "Backend address pool ${AzureAppGatewayResourceTemplate.defaultAppGatewayBeAddrPoolName} not found in ${appGatewayName}"
         log.error(errMsg)
         throw new RuntimeException(errMsg)
       }
 
-      def agBAP = appGateway.backendAddressPools?.find { it.name == serverGroupName}
+      def agBAP = appGateway.backends().get(serverGroupName)
       if (!agBAP) {
         def errMsg = "Backend address pool ${serverGroupName} not found in ${appGatewayName}"
         log.error(errMsg)
@@ -427,23 +633,25 @@ class AzureNetworkClient extends AzureBaseClient {
 
       // Check if the current server group is the traffic enabled one and remove it (set default BAP as the active BAP)
       //  otherwise return (no updates are needed)
-      def requestedRoutingRules = appGateway.requestRoutingRules?.findAll() {
-        it.backendAddressPool.id == agBAP.id
+      def requestedRoutingRules = appGateway.requestRoutingRules()?.findAll() { name, rule ->
+        rule.backend() == agBAP
       }
 
       if (requestedRoutingRules) {
-        requestedRoutingRules.each {
-          it.backendAddressPool.id = defaultBAP.id
+        requestedRoutingRules.each { name, rule ->
+          appGateway.update()
+            .updateRequestRoutingRule(name)
+            .toBackend(defaultBAP.name())
+            .parent()
+            .apply()
         }
 
         // Clear active server group (if any) from the tags map to ease debugging the operation; we will clean this later
-        appGateway.tags.remove("trafficEnabledSG")
-
-        return executeOp({ appGatewayOps.createOrUpdate(resourceGroupName, appGatewayName, appGateway) })
+        appGateway.update()
+          .withoutTag("trafficEnabledSG")
+          .apply()
       }
     }
-
-    null
   }
 
   /**
@@ -454,17 +662,151 @@ class AzureNetworkClient extends AzureBaseClient {
    * @return true or false
    */
   Boolean isServerGroupDisabled(String resourceGroupName, String appGatewayName, String serverGroupName) {
-    def appGateway = executeOp({appGatewayOps.get(resourceGroupName, appGatewayName)})?.body
+    def appGateway = executeOp({
+      azure.applicationGateways().getByResourceGroup(resourceGroupName, appGatewayName)
+    })
 
     if (appGateway) {
-      def agBAP = appGateway.backendAddressPools?.find { it.name == serverGroupName }
+      def agBAP = appGateway.backends().get(serverGroupName)
       if (agBAP) {
         // Check if the current server group is the traffic enabled one
-        def requestedRoutingRule = appGateway.requestRoutingRules?.find() {
-          it.backendAddressPool.id == agBAP.id
+        def requestedRoutingRules = appGateway.requestRoutingRules()?.find() { name, rule ->
+          rule.backend() == agBAP
         }
 
-        if (requestedRoutingRule) {
+        if (requestedRoutingRules != null) {
+          return false
+        }
+      }
+    }
+
+    true
+  }
+
+  /**
+   * It enables a server group that is attached to an Azure Load Balancer in Azure
+   * @param resourceGroupName name of the resource group where the Azure Load Balancer resource was created (see application name and region/location)
+   * @param loadBalancerName the of the Azure Load Balancer
+   * @param serverGroupName name of the server group to be enabled
+   * @return a ServiceResponse object
+   */
+  void enableServerGroupWithLoadBalancer(String resourceGroupName, String loadBalancerName, String serverGroupName) {
+    def loadBalancer = executeOp({
+      azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+    })
+
+    if (loadBalancer) {
+      def lbBAP = loadBalancer.backends().get(serverGroupName)
+      if (!lbBAP) {
+        def errMsg = "Backend address pool ${serverGroupName} not found in ${loadBalancerName}"
+        log.error(errMsg)
+        throw new RuntimeException(errMsg)
+      }
+
+      loadBalancer.loadBalancingRules().each { name, rule ->
+        // Use reflection to modify the backend of load balancer because Azure Java SDK doesn't provide a way to do this
+        Object o = loadBalancer.update()
+          .updateLoadBalancingRule(name)
+        try {
+          Method setRangeMethod = o.getClass().getMethod("toBackend", String.class)
+          setRangeMethod.setAccessible(true)
+          setRangeMethod.invoke(o, serverGroupName)
+        } catch (NoSuchMethodException e) {
+          log.error("Failed to use reflection to set backend of rule in Load Balancer, detail: {}", e.getMessage())
+          return
+        } catch (IllegalAccessException e) {
+          log.error("Failed to use reflection to set backend of rule in Load Balancer, detail: {}", e.getMessage())
+          return
+        } catch (InvocationTargetException e) {
+          log.error("Failed to use reflection to set backend of rule in Load Balancer, detail: {}", e.getMessage())
+          return
+        }
+
+        ((LoadBalancingRule.UpdateDefinitionStages.WithAttach<LoadBalancer.Update>)o).attach().apply()
+      }
+    }
+  }
+
+  /**
+   * It disables a server group that is attached to an Azure Load Balancer  resource in Azure
+   * @param resourceGroupName name of the resource group where the Azure Load Balancer  resource was created (see application name and region/location)
+   * @param loadBalancerName the of the Azure Load Balancer
+   * @param serverGroupName name of the server group to be disabled
+   * @return a ServiceResponse object (null if no updates were performed)
+   */
+  void disableServerGroupWithLoadBalancer(String resourceGroupName, String loadBalancerName, String serverGroupName) {
+    def loadBalancer = executeOp({
+      azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+    })
+
+    if (loadBalancer) {
+      def defaultBAP = loadBalancer.backends().get(AzureLoadBalancerResourceTemplate.DEFAULT_BACKEND_POOL)
+      if (!defaultBAP) {
+        def errMsg = "Backend address pool ${AzureLoadBalancerResourceTemplate.DEFAULT_BACKEND_POOL} not found in ${loadBalancerName}"
+        log.error(errMsg)
+        throw new RuntimeException(errMsg)
+      }
+
+      def lbBAP = loadBalancer.backends().get(serverGroupName)
+      if (!lbBAP) {
+        def errMsg = "Backend address pool ${serverGroupName} not found in ${loadBalancerName}"
+        log.error(errMsg)
+        throw new RuntimeException(errMsg)
+      }
+
+      // Check if the current server group is the traffic enabled one and remove it (set default BAP as the active BAP)
+      //  otherwise return (no updates are needed)
+      def requestedRoutingRules = loadBalancer.loadBalancingRules()?.findAll() { name, rule ->
+        rule.backend() == lbBAP
+      }
+
+      if (requestedRoutingRules) {
+        requestedRoutingRules.each { name, rule ->
+          // Use reflection to modify the backend of load balancer because Azure Java SDK doesn't provide a way to do this
+          Object o = loadBalancer.update()
+            .updateLoadBalancingRule(name)
+          try {
+            Method setRangeMethod = o.getClass().getMethod("toBackend", String.class)
+            setRangeMethod.setAccessible(true)
+            setRangeMethod.invoke(o, AzureLoadBalancerResourceTemplate.DEFAULT_BACKEND_POOL)
+          } catch (NoSuchMethodException e) {
+            log.error("Failed to use reflection to set backend of rule in Load Balancer, detail: {}", e.getMessage())
+            return
+          } catch (IllegalAccessException e) {
+            log.error("Failed to use reflection to set backend of rule in Load Balancer, detail: {}", e.getMessage())
+            return
+          } catch (InvocationTargetException e) {
+            log.error("Failed to use reflection to set backend of rule in Load Balancer, detail: {}", e.getMessage())
+            return
+          }
+
+          ((LoadBalancingRule.UpdateDefinitionStages.WithAttach<LoadBalancer.Update>)o).attach().apply()
+        }
+      }
+    }
+  }
+
+  /**
+   * Checks if a server group that is attached to an Azure Load Balancer resource in Azure is set to receive traffic
+   * @param resourceGroupName name of the resource group where the Azure Load Balancer resource was created (see application name and region/location)
+   * @param loadBalancerName the of the Azure Load Balancer
+   * @param serverGroupName name of the server group to be disabled
+   * @return true or false
+   */
+  Boolean isServerGroupWithLoadBalancerDisabled(String resourceGroupName, String loadBalancerName, String serverGroupName) {
+    def loadBalancer = executeOp({
+      azure.loadBalancers().getByResourceGroup(resourceGroupName, loadBalancerName)
+    })
+
+    if (loadBalancer) {
+      def lbBAP = loadBalancer.backends().get(serverGroupName)
+      if (lbBAP) {
+        // Check if the current server group is the traffic enabled one
+        def requestedRoutingRules = loadBalancer.loadBalancingRules()?.find() { name, rule ->
+          rule.backend() == lbBAP
+        }
+
+        if (requestedRoutingRules != null) {
           return false
         }
       }
@@ -480,9 +822,21 @@ class AzureNetworkClient extends AzureBaseClient {
    * @return a ServiceResponse object
    */
   ServiceResponse deleteSecurityGroup(String resourceGroupName, String securityGroupName) {
+    def associatedSubnets = azure.networkSecurityGroups().getByResourceGroup(resourceGroupName, securityGroupName).listAssociatedSubnets()
+
+    associatedSubnets?.each{ associatedSubnet ->
+      def subnetName = associatedSubnet.inner().name()
+      associatedSubnet
+        .parent()
+        .update()
+        .updateSubnet(subnetName)
+        .withoutNetworkSecurityGroup()
+        .parent()
+        .apply()
+    }
 
     deleteAzureResource(
-      networkSecurityGroupOperations.&delete,
+      azure.networkSecurityGroups().&deleteByResourceGroup,
       resourceGroupName,
       securityGroupName,
       null,
@@ -499,26 +853,14 @@ class AzureNetworkClient extends AzureBaseClient {
    */
   void createVirtualNetwork(String resourceGroupName, String virtualNetworkName, String region, String addressPrefix = AzureUtilities.VNET_DEFAULT_ADDRESS_PREFIX) {
     try {
-      List<Subnet> subnets = []
-
-      // Define address space
-      List<String> addressPrefixes = []
-      addressPrefixes.add(addressPrefix)
-      AddressSpace addressSpace = new AddressSpace()
-      addressSpace.setAddressPrefixes(addressPrefixes)
-
-      // Define DHCP Options
-      DhcpOptions dhcpOptions = new DhcpOptions()
-      dhcpOptions.dnsServers = []
-
-      VirtualNetwork virtualNetwork = new VirtualNetwork()
-      virtualNetwork.setLocation(region)
-      virtualNetwork.setDhcpOptions(dhcpOptions)
-      virtualNetwork.setSubnets(subnets)
-      virtualNetwork.setAddressSpace(addressSpace)
 
       //Create the virtual network for the resource group
-      virtualNetworksOperations.createOrUpdate(resourceGroupName, virtualNetworkName, virtualNetwork)
+      azure.networks()
+        .define(virtualNetworkName)
+        .withRegion(region)
+        .withExistingResourceGroup(resourceGroupName)
+        .withAddressSpace(addressPrefix)
+        .create()
     }
     catch (e) {
       throw new RuntimeException("Unable to create Virtual network ${virtualNetworkName} in Resource Group ${resourceGroupName}", e)
@@ -535,26 +877,27 @@ class AzureNetworkClient extends AzureBaseClient {
    * @returns Resource ID of subnet created
    */
   String createSubnet(String resourceGroupName, String virtualNetworkName, String subnetName, String addressPrefix, String securityGroupName) {
-    Subnet subnet = new Subnet()
-    subnet.setAddressPrefix(addressPrefix)
+    def virtualNetwork = azure.networks().getByResourceGroup(resourceGroupName, virtualNetworkName)
+
+    if (virtualNetwork == null) {
+      def error = "Virtual network: ${virtualNetwork} not found when creating subnet: ${subnetName}"
+      log.error error
+      throw new RuntimeException(error)
+    }
+
+    def chain = virtualNetwork.update()
+      .defineSubnet(subnetName)
+      .withAddressPrefix(addressPrefix)
 
     if (securityGroupName) {
-      addSecurityGroupToSubnet(resourceGroupName, securityGroupName, subnet)
+      def sg = azure.networkSecurityGroups().getByResourceGroup(resourceGroupName, securityGroupName)
+      chain.withExistingNetworkSecurityGroup(sg)
     }
 
-    //This will throw an exception if the it fails. If it returns then the call was successful
-    //Log the error Let it bubble up to the caller to handle as they see fit
-    try {
-      def op = subnetOperations.createOrUpdate(resourceGroupName, virtualNetworkName, subnetName, subnet)
+    chain.attach()
+      .apply()
 
-      // Return the resource Id
-      op?.body?.id
-
-    } catch (Exception e) {
-      // Add something to the log to show that the subnet creation failed then rethrow the exception
-      log.error("Unable to create subnet ${subnetName} in Resource Group ${resourceGroupName}")
-      throw e
-    }
+    virtualNetwork.subnets().get(subnetName).inner().id()
   }
 
   /**
@@ -568,18 +911,18 @@ class AzureNetworkClient extends AzureBaseClient {
   ServiceResponse<Void> deleteSubnet(String resourceGroupName, String virtualNetworkName, String subnetName) {
 
     deleteAzureResource(
-      subnetOperations.&delete,
+      {
+        String _resourceGroupName, String _subnetName, String _virtualNetworkName ->
+          azure.networks().getByResourceGroup(_resourceGroupName, _virtualNetworkName).update()
+            .withoutSubnet(_subnetName)
+            .apply()
+      },
       resourceGroupName,
       subnetName,
       virtualNetworkName,
       "Delete subnet ${subnetName}",
       "Failed to delete subnet ${subnetName} in ${resourceGroupName}"
     )
-  }
-
-  private void addSecurityGroupToSubnet(String resourceGroupName, String securityGroupName, Subnet subnet) {
-    def securityGroup = executeOp({networkSecurityGroupOperations.get(resourceGroupName, securityGroupName, null)})?.body
-    subnet.setNetworkSecurityGroup(securityGroup)
   }
 
   /**
@@ -591,18 +934,20 @@ class AzureNetworkClient extends AzureBaseClient {
     def result = new ArrayList<AzureSecurityGroupDescription>()
 
     try {
-      def securityGroups = executeOp({networkSecurityGroupOperations.listAll()})?.body
+      def securityGroups = executeOp({
+        azure.networkSecurityGroups().list()
+      })
       def currentTime = System.currentTimeMillis()
       securityGroups?.each { item ->
-        if (item.location == region) {
+        if (item.inner().location() == region) {
           try {
-            def sgItem = getAzureSecurityGroupDescription(item)
+            def sgItem = getAzureSecurityGroupDescription(item.inner())
             sgItem.lastReadTime = currentTime
             result += sgItem
           } catch (RuntimeException re) {
             // if we get a runtime exception here, log it but keep processing the rest of the
             // NSGs
-            log.error("Unable to process network security group ${item.name}: ${re.message}")
+            log.error("Unable to process network security group ${item.name()}: ${re.message}")
           }
         }
       }
@@ -621,9 +966,11 @@ class AzureNetworkClient extends AzureBaseClient {
    */
   AzureSecurityGroupDescription getNetworkSecurityGroup(String resourceGroupName, String securityGroupName) {
     try {
-      def securityGroup = executeOp({networkSecurityGroupOperations.get(resourceGroupName, securityGroupName, null)})?.body
+      def securityGroup = executeOp({
+        azure.networkSecurityGroups().getByResourceGroup(resourceGroupName, securityGroupName)
+      })
       def currentTime = System.currentTimeMillis()
-      def sgItem = getAzureSecurityGroupDescription(securityGroup)
+      def sgItem = getAzureSecurityGroupDescription(securityGroup.inner())
       sgItem.lastReadTime = currentTime
 
       return sgItem
@@ -634,41 +981,47 @@ class AzureNetworkClient extends AzureBaseClient {
     null
   }
 
-  private static AzureSecurityGroupDescription getAzureSecurityGroupDescription(NetworkSecurityGroup item) {
+  private static AzureSecurityGroupDescription getAzureSecurityGroupDescription(NetworkSecurityGroupInner item) {
     def sgItem = new AzureSecurityGroupDescription()
-
-    sgItem.name = item.name
-    sgItem.id = item.name
-    sgItem.location = item.location
-    sgItem.region = item.location
+    sgItem.name = item.name()
+    sgItem.id = item.name()
+    sgItem.location = item.location()
+    sgItem.region = item.name()
     sgItem.cloudProvider = "azure"
-    sgItem.provisioningState = item.provisioningState
-    sgItem.resourceGuid = item.resourceGuid
-    sgItem.resourceId = item.id
-    sgItem.tags = item.tags
-    def parsedName = Names.parseName(item.name)
+    sgItem.provisioningState = item.provisioningState()
+    sgItem.resourceGuid = item.id()
+    sgItem.resourceId = item.id()
+    sgItem.tags.putAll(item.tags)
+    def parsedName = Names.parseName(item.name())
     sgItem.stack = item.tags?.stack ?: parsedName.stack
     sgItem.detail = item.tags?.detail ?: parsedName.detail
     sgItem.appName = item.tags?.appName ?: parsedName.app
     sgItem.createdTime = item.tags?.createdTime?.toLong()
-    sgItem.type = item.type
+    sgItem.type = item.type()
     sgItem.securityRules = new ArrayList<AzureSecurityGroupDescription.AzureSGRule>()
-    item.securityRules?.each {rule -> sgItem.securityRules += new AzureSecurityGroupDescription.AzureSGRule(
-      resourceId: rule.id,
-      id: rule.name,
-      name: rule.name,
-      access: rule.access,
-      priority: rule.priority,
-      protocol: rule.protocol,
-      direction: rule.direction,
-      destinationAddressPrefix: rule.destinationAddressPrefix,
-      destinationPortRange: rule.destinationPortRange,
-      sourceAddressPrefix: rule.sourceAddressPrefix,
-      sourcePortRange: rule.sourcePortRange) }
+    item.securityRules().each { rule ->
+      sgItem.securityRules += new AzureSecurityGroupDescription.AzureSGRule(
+        resourceId: rule.id(),
+        id: rule.name(),
+        name: rule.name(),
+        access: rule.access().toString(),
+        priority: rule.priority(),
+        protocol: rule.protocol().toString(),
+        direction: rule.direction().toString(),
+        destinationAddressPrefix: rule.destinationAddressPrefix(),
+        destinationPortRange: rule.destinationPortRange(),
+        destinationPortRanges: rule.destinationPortRanges(),
+        destinationPortRangeModel: rule.destinationPortRange() ? rule.destinationPortRange() : rule.destinationPortRanges()?.toString()?.replaceAll("[^(0-9),-]", ""),
+        sourceAddressPrefix: rule.sourceAddressPrefix(),
+        sourceAddressPrefixes: rule.sourceAddressPrefixes(),
+        sourceAddressPrefixModel: rule.sourceAddressPrefix() ? rule.sourceAddressPrefix() : rule.sourceAddressPrefixes()?.toString()?.replaceAll("[^(0-9a-zA-Z)./,:]", ""),
+        sourcePortRange: rule.sourcePortRange())
+    }
+
     sgItem.subnets = new ArrayList<String>()
-    item.subnets?.each { sgItem.subnets += AzureUtilities.getNameFromResourceId(it.id) }
+    item.subnets()?.each { sgItem.subnets += AzureUtilities.getNameFromResourceId(it.id()) }
     sgItem.networkInterfaces = new ArrayList<String>()
-    item.networkInterfaces?.each { sgItem.networkInterfaces += it.id }
+    item.networkInterfaces()?.each { sgItem.networkInterfaces += it.id() }
 
     sgItem
   }
@@ -682,18 +1035,20 @@ class AzureNetworkClient extends AzureBaseClient {
     def result = new ArrayList<AzureSubnetDescription>()
 
     try {
-      def vnets = executeOp({virtualNetworksOperations.listAll()})?.body
+      def vnets = executeOp({
+        azure.networks().list()
+      })
       def currentTime = System.currentTimeMillis()
-      vnets?.each { item->
-        if (item.location == region) {
+      vnets?.each { item ->
+        if (item.inner().location() == region) {
           try {
-            AzureSubnetDescription.getSubnetsForVirtualNetwork(item).each { AzureSubnetDescription subnet ->
+            AzureSubnetDescription.getSubnetsForVirtualNetwork(item.inner()).each { AzureSubnetDescription subnet ->
               subnet.lastReadTime = currentTime
               result += subnet
             }
           } catch (RuntimeException re) {
             // if we get a runtime exception here, log it but keep processing the rest of the subnets
-            log.error("Unable to process subnets for virtual network ${item.name}", re)
+            log.error("Unable to process subnets for virtual network ${item.name()}", re)
           }
         }
       }
@@ -710,8 +1065,10 @@ class AzureNetworkClient extends AzureBaseClient {
    * @param virtualNetworkName name of the virtual network to get
    * @return virtual network instance, or null if it does not exist
    */
-  VirtualNetwork getVirtualNetwork(String resourceGroupName, String virtualNetworkName) {
-    executeOp({virtualNetworksOperations.get(resourceGroupName, virtualNetworkName, null)})?.body
+  Network getVirtualNetwork(String resourceGroupName, String virtualNetworkName) {
+    executeOp({
+      azure.networks().getByResourceGroup(resourceGroupName, virtualNetworkName)
+    })
   }
 
   /**
@@ -719,31 +1076,33 @@ class AzureNetworkClient extends AzureBaseClient {
    * @param region the location of the virtual network
    * @return a Collection of objects which represent a Virtual Network in Azure
    */
-  Collection<AzureVirtualNetworkDescription> getVirtualNetworksAll(String region){
+  Collection<AzureVirtualNetworkDescription> getVirtualNetworksAll(String region) {
     def result = new ArrayList<AzureVirtualNetworkDescription>()
 
     try {
-      def vnetList = executeOp({virtualNetworksOperations.listAll()})?.body
+      def vnetList = executeOp({
+        azure.networks().list()
+      })
       def currentTime = System.currentTimeMillis()
       vnetList?.each { item ->
-        if (item.location == region) {
+        if (item.inner().location() == region) {
           try {
-            if (item?.addressSpace?.addressPrefixes?.size() != 1) {
-              log.warn("Virtual Network found with ${item?.addressSpace?.addressPrefixes?.size()} address spaces; expected: 1")
+            if (item?.inner().addressSpace()?.addressPrefixes()?.size() != 1) {
+              log.warn("Virtual Network found with ${item?.inner().addressSpace()?.addressPrefixes()?.size()} address spaces; expected: 1")
             }
 
-            def vnet = AzureVirtualNetworkDescription.getDescriptionForVirtualNetwork(item)
-            vnet.subnets = AzureSubnetDescription.getSubnetsForVirtualNetwork(item)
+            def vnet = AzureVirtualNetworkDescription.getDescriptionForVirtualNetwork(item.inner())
+            vnet.subnets = AzureSubnetDescription.getSubnetsForVirtualNetwork(item.inner()).toList()
 
-            def appGateways = executeOp({appGatewayOps.listAll()})?.body
-            AzureSubnetDescription.getAppGatewaysConnectedResources(vnet, appGateways.findAll {it.location == region})
+//            def appGateways = executeOp({ appGatewayOps.listAll() })?.body
+//            AzureSubnetDescription.getAppGatewaysConnectedResources(vnet, appGateways.findAll { it.location == region })
 
             vnet.lastReadTime = currentTime
             result += vnet
           } catch (RuntimeException re) {
             // if we get a runtime exception here, log it but keep processing the rest of the
             // virtual networks
-            log.error("Unable to process virtual network ${item.name}", re)
+            log.error("Unable to process virtual network ${item.inner().name()}", re)
           }
         }
       }
@@ -765,11 +1124,10 @@ class AzureNetworkClient extends AzureBaseClient {
 
     try {
       PublicIPAddress publicIp = publicIpName ?
-        executeOp({publicIPAddressOperations.get(
-          resourceGroupName,
-          publicIpName, null)}
-        )?.body : null
-      if (publicIp?.dnsSettings?.fqdn) dnsName = publicIp.dnsSettings.fqdn
+        executeOp({
+          azure.publicIPAddresses().getByResourceGroup(resourceGroupName, publicIpName)
+        }) : null
+      if (publicIp?.fqdn()) dnsName = publicIp.fqdn()
     } catch (Exception e) {
       log.error("getDnsNameForPublicIp -> Unexpected exception ", e)
     }
@@ -777,14 +1135,9 @@ class AzureNetworkClient extends AzureBaseClient {
     dnsName
   }
 
-  private NetworkManagementClient initializeClient(ApplicationTokenCredentials tokenCredentials) {
-    NetworkManagementClient networkManagementClient = new NetworkManagementClientImpl(tokenCredentials)
-    networkManagementClient.setSubscriptionId(this.subscriptionId)
-    networkManagementClient.setLogLevel(HttpLoggingInterceptor.Level.NONE)
-
-    setUserAgent(networkManagementClient, userAgentApplicationName, true)
-
-    networkManagementClient
+  Boolean checkDnsNameAvailability(String dnsName) {
+    def isAvailable = azure.trafficManagerProfiles().checkDnsNameAvailability(dnsName)
+    isAvailable
   }
 
   /***
